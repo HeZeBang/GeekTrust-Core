@@ -19,7 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"geektrust/internal/frame"
+	"github.com/nanakusa-electronics/geektrust/internal/frame"
 )
 
 const (
@@ -498,7 +498,7 @@ func (t *Tunnel) handleAuthResponse(payload []byte) {
 // dispatch routes a downlink IPv4 TCP or UDP packet to the flow owning its
 // destination port (our virtual source port).
 func (t *Tunnel) dispatch(pkt []byte) {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 || (pkt[9] != 6 && pkt[9] != 17) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || (pkt[9] != 6 && pkt[9] != 17 && pkt[9] != 1) {
 		return
 	}
 	ihl := int(pkt[0]&0x0F) * 4
@@ -506,6 +506,12 @@ func (t *Tunnel) dispatch(pkt []byte) {
 		return
 	}
 	dport := binary.BigEndian.Uint16(pkt[ihl+2 : ihl+4])
+	if pkt[9] == 1 {
+		if len(pkt) < ihl+8 || pkt[ihl] != 0 {
+			return
+		}
+		dport = binary.BigEndian.Uint16(pkt[ihl+4 : ihl+6])
+	}
 	t.connsMu.Lock()
 	sink := t.conns[dport]
 	t.connsMu.Unlock()

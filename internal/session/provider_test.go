@@ -10,13 +10,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/sdpc"
+	"github.com/nanakusa-electronics/geektrust/internal/config"
+	"github.com/nanakusa-electronics/geektrust/internal/sdpc"
 )
 
 type smsHandlerFunc func(context.Context, func(context.Context) error) (string, error)
@@ -109,7 +110,7 @@ func TestRestoreSkipsDifferentClientType(t *testing.T) {
 			statePath := filepath.Join(t.TempDir(), "state.enc")
 			store := NewStore(statePath)
 			const deviceID = "0123456789ABCDEF0123456789ABCDEF"
-			if err := store.Save(&State{
+			if err := store.Save(context.Background(), &State{
 				SID:        "synthetic-session",
 				DeviceID:   deviceID,
 				Cookies:    []CookieRecord{{Name: "sid", Value: "synthetic-session"}},
@@ -145,7 +146,7 @@ func TestRestoreSkipsDifferentClientType(t *testing.T) {
 func TestInvalidateSkipsRestore(t *testing.T) {
 	dir := t.TempDir()
 	st := NewStore(filepath.Join(dir, "state.enc"))
-	if err := st.Save(&State{SID: "old-session", DeviceID: "D", Cookies: []CookieRecord{{Name: "sid", Value: "old-session"}}}); err != nil {
+	if err := st.Save(context.Background(), &State{SID: "old-session", DeviceID: "D", Cookies: []CookieRecord{{Name: "sid", Value: "old-session"}}}); err != nil {
 		t.Fatal(err)
 	}
 	p := &Provider{store: st}
@@ -180,18 +181,18 @@ func TestStoreKeyPermissionTightening(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := NewStore(filepath.Join(dir, "state.enc"))
-	if err := st.Save(&State{SID: "s"}); err != nil {
+	if err := st.Save(context.Background(), &State{SID: "s"}); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(keyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Errorf("key perm = %o, want 600", info.Mode().Perm())
 	}
 	// The original key must still decrypt the state (tighten, never replace).
-	got, err := st.Load()
+	got, err := st.Load(context.Background())
 	if err != nil || got.SID != "s" {
 		t.Errorf("Load after tighten = %v, %v", got, err)
 	}
@@ -204,14 +205,14 @@ func TestStoreKeyExclusiveCreate(t *testing.T) {
 	st := NewStore(filepath.Join(dir, "state.enc"))
 	// Simulate the winner: create the key first.
 	winner := NewStore(filepath.Join(dir, "state.enc"))
-	if err := winner.Save(&State{SID: "winner"}); err != nil {
+	if err := winner.Save(context.Background(), &State{SID: "winner"}); err != nil {
 		t.Fatal(err)
 	}
 	// A second store over the same files must reuse the winner's key.
-	if err := st.Save(&State{SID: "second"}); err != nil {
+	if err := st.Save(context.Background(), &State{SID: "second"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := st.Load()
+	got, err := st.Load(context.Background())
 	if err != nil || got.SID != "second" {
 		t.Errorf("Load = %v, %v", got, err)
 	}

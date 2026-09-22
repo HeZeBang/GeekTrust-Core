@@ -16,9 +16,6 @@ import (
 // terminals require a unique identity per installation.
 const DefaultDeviceID = "84B5B45FE73EC0036C3E97717308447F"
 
-// DefaultAppID is the "电子资源" (library) application.
-const DefaultAppID = "681165d0-1c77-11ed-8650-cd35a51aa42a"
-
 // DefaultBaseURL is the ShanghaiTech aTrust controller.
 const DefaultBaseURL = "https://vpn.shanghaitech.edu.cn"
 
@@ -27,18 +24,18 @@ const DefaultWebListen = "127.0.0.1:8081"
 
 // Config is the top-level configuration.
 type Config struct {
-	Keystore   string    `toml:"keystore"`
-	DeviceID   string    `toml:"device_id"`
-	BaseURL    string    `toml:"base_url"`
-	Platform   string    `toml:"platform"`
-	AppID      string    `toml:"app_id"`
-	ClientType string    `toml:"client_type"`
-	Gateways   []string  `toml:"gateways"`
-	DNS        []string  `toml:"dns"`
-	StateFile  string    `toml:"state_file"`
-	LogLevel   string    `toml:"log_level"`
-	Inbound    Inbound   `toml:"inbound"`
-	Web        WebConfig `toml:"web"`
+	Keystore    string    `toml:"keystore"`
+	DeviceID    string    `toml:"device_id"`
+	BaseURL     string    `toml:"base_url"`
+	Platform    string    `toml:"platform"`
+	ClientType  string    `toml:"client_type"`
+	LoginDomain string    `toml:"login_domain"`
+	Gateways    []string  `toml:"gateways"`
+	DNS         []string  `toml:"dns"`
+	StateFile   string    `toml:"state_file"`
+	LogLevel    string    `toml:"log_level"`
+	Inbound     Inbound   `toml:"inbound"`
+	Web         WebConfig `toml:"web"`
 }
 
 // Inbound holds the proxy listener configuration.
@@ -94,9 +91,7 @@ func (c *Config) applyDefaults() {
 	if c.Platform == "" {
 		c.Platform = "Mac"
 	}
-	if c.AppID == "" {
-		c.AppID = DefaultAppID
-	}
+
 	if c.StateFile == "" {
 		c.StateFile = "./state.enc"
 	}

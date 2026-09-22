@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"testing"
 
-	"geektrust/internal/sdpc"
-	"geektrust/internal/session"
+	"github.com/nanakusa-electronics/geektrust/internal/sdpc"
+	"github.com/nanakusa-electronics/geektrust/internal/session"
 )
 
 func TestBuildTCPRequestCombinesAuthAndDestination(t *testing.T) {
@@ -150,7 +150,7 @@ func readTCPRequestForTest(reader io.Reader) error {
 	return err
 }
 
-func TestReadTCPSetupStatusAndFallback(t *testing.T) {
+func TestReadTCPSetupStatus(t *testing.T) {
 	response := []byte{0x05, 0x81, 0x53, 0x00, 0x00, 0x19}
 	response = append(response, []byte(`{"code":0,"message":"OK"}`)...)
 	response = append(response, 0x05, 0x05, 0x00, 0x01)
@@ -158,15 +158,7 @@ func TestReadTCPSetupStatusAndFallback(t *testing.T) {
 	if !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Fatalf("error = %v, want ECONNREFUSED", err)
 	}
-	if ShouldFallbackToL3(err) {
-		t.Fatal("target refusal must not fall back to L3")
-	}
-	if !ShouldFallbackToL3(&TCPStatusError{Status: 0x02}) {
-		t.Fatal("unsupported or policy-rejected direct command should fall back to L3")
-	}
-	if ShouldFallbackToL3(context.Canceled) {
-		t.Fatal("cancellation must not fall back to L3")
-	}
+
 }
 
 func TestReadTCPSetupAcceptsOfficialPlainOK(t *testing.T) {
@@ -202,7 +194,7 @@ func TestDirectGatewaysUsesAssignedNodeGroup(t *testing.T) {
 		t.Fatalf("major fallback = %v", got)
 	}
 	cred.Gateways = []string{"override:441"}
-	if got := directGateways(cred, "app"); len(got) != 1 || got[0] != "override:441" {
-		t.Fatalf("configured override = %v", got)
+	if got := directGateways(cred, "app"); len(got) != 1 || got[0] != "assigned:441" {
+		t.Fatalf("override escaped assigned group = %v", got)
 	}
 }

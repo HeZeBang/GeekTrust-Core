@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/nanakusa-electronics/geektrust/internal/privatefile"
 	"io"
 	"os"
 	"path/filepath"
@@ -61,7 +62,6 @@ func PrepareInitialConfig(opts InitOptions) (*Config, error) {
 		DeviceID:   opts.DeviceID,
 		BaseURL:    DefaultBaseURL,
 		Platform:   "Mac",
-		AppID:      DefaultAppID,
 		ClientType: opts.ClientType,
 		StateFile:  opts.StateFile,
 		LogLevel:   "info",
@@ -156,7 +156,7 @@ func writeConfigFile(path string, data []byte, force bool) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := privatefile.Protect(tmpPath); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("secure temporary config: %w", err)
 	}
@@ -170,6 +170,10 @@ func writeConfigFile(path string, data []byte, force bool) error {
 }
 
 func writeAndClose(f *os.File, data []byte) error {
+	if err := privatefile.Protect(f.Name()); err != nil {
+		f.Close()
+		return err
+	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("write config: %w", err)

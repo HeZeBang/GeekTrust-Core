@@ -76,6 +76,8 @@ func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net
 		network = "tcp"
 	case protocolUDP:
 		network = "udp"
+	case 1:
+		network = "icmp"
 	default:
 		return nil, fmt.Errorf("unsupported IP protocol %d", protocol)
 	}

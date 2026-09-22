@@ -11,14 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/idsauth"
-	"geektrust/internal/sdpc"
+	"github.com/nanakusa-electronics/geektrust/internal/config"
+	"github.com/nanakusa-electronics/geektrust/internal/idsauth"
+	"github.com/nanakusa-electronics/geektrust/internal/sdpc"
 )
-
-// DefaultGateways are the well-known external gateway lines, used when
-// neither config nor clientResource provides any.
-var DefaultGateways = []string{"119.78.254.241:441", "59.78.171.241:441"}
 
 // errSMSAuthSessionExpired marks an expiration discovered after the user has
 // entered the SMS wait. login catches it and rebuilds the whole IDS/controller
@@ -27,6 +23,7 @@ var errSMSAuthSessionExpired = errors.New("SMS authentication session expired")
 
 // Credential is everything the tunnel and resolver need from a live session.
 type Credential struct {
+	Original     *Credential
 	SID          string
 	DeviceID     string
 	Username     string
@@ -38,7 +35,6 @@ type Credential struct {
 	// Policy is the full routing policy (domain/IP/CIDR × port → appId)
 	// from clientResource.
 	Policy *sdpc.Resource
-	AppID  string
 }
 
 // SMSPrompter asks the user for the SMS verification code. It runs whenever
@@ -62,11 +58,13 @@ type CredentialProvider interface {
 // credentials, restoring a persisted session or re-logging in silently
 // when the controller does not request SMS.
 type Provider struct {
-	cfg        *config.Config
-	logger     *slog.Logger
-	prompt     SMSPrompter
-	smsHandler SMSHandler // set by SetSMSHandler during web wiring
-	store      *Store
+	cfg          *config.Config
+	logger       *slog.Logger
+	prompt       SMSPrompter
+	smsHandler   SMSHandler // set by SetSMSHandler during web wiring
+	store        StateStore
+	Authenticate func(context.Context, *http.Client) (string, error)
+	Transport    http.RoundTripper
 
 	mu         sync.Mutex
 	cur        *Credential
@@ -79,6 +77,7 @@ type Provider struct {
 	dispQueue   []Event
 	dispDropped uint64
 	observers   []Observer
+	dispClosed  bool
 	dispStarted bool
 }
 
@@ -146,7 +145,7 @@ func (p *Provider) AddObserver(o Observer) {
 func (p *Provider) emit(ev Event) {
 	p.dispMu.Lock()
 	defer p.dispMu.Unlock()
-	if len(p.observers) == 0 {
+	if p.dispClosed || len(p.observers) == 0 {
 		return
 	}
 	ev.Time = time.Now()
@@ -166,8 +165,12 @@ func (p *Provider) emit(ev Event) {
 func (p *Provider) drainEvents() {
 	for {
 		p.dispMu.Lock()
-		for len(p.dispQueue) == 0 {
+		for len(p.dispQueue) == 0 && !p.dispClosed {
 			p.dispCond.Wait()
+		}
+		if p.dispClosed {
+			p.dispMu.Unlock()
+			return
 		}
 		ev := p.dispQueue[0]
 		p.dispQueue[0] = Event{}
@@ -187,6 +190,9 @@ func (p *Provider) drainEvents() {
 // Credential returns current valid credentials. Concurrent callers share one
 // in-flight restore/login.
 func (p *Provider) Credential(ctx context.Context) (*Credential, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	if p.cur != nil {
 		cred := p.cur
@@ -357,7 +363,10 @@ func (p *Provider) CheckLoop(ctx context.Context, interval time.Duration) {
 		if !p.InvalidateIfCurrent(cred) {
 			continue
 		}
-		if _, err := p.Credential(ctx); err != nil {
+		refreshCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		_, refreshErr := p.Credential(refreshCtx)
+		cancel()
+		if err := refreshErr; err != nil {
 			p.logger.Error("silent re-login failed", "err", err)
 		} else {
 			p.logger.Info("silent re-login succeeded")
@@ -379,7 +388,7 @@ func (p *Provider) acquire(ctx context.Context, force bool) (*Credential, *Sessi
 		if cred, session, err := p.restore(ctx); err != nil {
 			p.logger.Warn("restoring persisted session failed; performing full login", "err", err)
 		} else if cred != nil {
-			p.logger.Info("restored persisted session", "sid", ShortSID(cred.SID))
+			p.logger.Info("restored persisted session", "restored", true)
 			return cred, session, true, nil
 		}
 	}
@@ -391,7 +400,7 @@ func (p *Provider) acquire(ctx context.Context, force bool) (*Credential, *Sessi
 // restore validates the persisted state via onlineInfo and rebuilds the
 // routing policy. Returns (nil, nil, nil) when there is nothing to restore.
 func (p *Provider) restore(ctx context.Context) (*Credential, *SessionInfo, error) {
-	st, err := p.store.Load()
+	st, err := p.store.Load(ctx)
 	if err != nil || st == nil {
 		return nil, nil, err
 	}
@@ -417,7 +426,7 @@ func (p *Provider) restore(ctx context.Context) (*Credential, *SessionInfo, erro
 	}
 
 	jar, _ := cookiejar.New(nil)
-	hc := &http.Client{Jar: jar, Timeout: 30 * time.Second}
+	hc := &http.Client{Jar: jar, Timeout: 30 * time.Second, Transport: p.Transport}
 	sc := p.newSDPC(hc)
 	cookies := make([]*http.Cookie, 0, len(st.Cookies))
 	for _, rec := range st.Cookies {
@@ -447,6 +456,7 @@ func (p *Provider) restore(ctx context.Context) (*Credential, *SessionInfo, erro
 // mode and unlocks trusted-terminal management.
 func (p *Provider) newSDPC(hc *http.Client) *sdpc.Client {
 	sc := sdpc.NewClient(p.cfg.BaseURL, p.cfg.Platform, p.cfg.DeviceID, hc)
+	sc.LoginDomain = p.cfg.LoginDomain
 	if p.cfg.ClientType == "client" {
 		sc.ClientType = sdpc.ClientTypeDesktop
 	}
@@ -474,20 +484,24 @@ func (p *Provider) login(ctx context.Context) (*Credential, *SessionInfo, error)
 // loginOnce runs one full sequence: IDS passkey → CAS → reportEnv → authCheck
 // (→ SMS when requested) → session exchange → clientResource.
 func (p *Provider) loginOnce(ctx context.Context) (*Credential, *SessionInfo, error) {
-	ks, err := idsauth.LoadKeystore(p.cfg.Keystore)
-	if err != nil {
-		return nil, nil, err
-	}
 	jar, _ := cookiejar.New(nil)
-	hc := &http.Client{Jar: jar, Timeout: 30 * time.Second}
-
-	p.logger.Info("logging in via IDS passkey", "user", ks.Username())
-	ids := idsauth.NewClient(ks, hc)
-	if err := ids.Login(ctx); err != nil {
-		return nil, nil, fmt.Errorf("ids login: %w", err)
+	hc := &http.Client{Jar: jar, Timeout: 30 * time.Second, Transport: p.Transport}
+	authenticate := p.Authenticate
+	if authenticate == nil {
+		authenticate = func(ctx context.Context, hc *http.Client) (string, error) {
+			ks, err := idsauth.LoadKeystore(p.cfg.Keystore)
+			if err != nil {
+				return "", err
+			}
+			if err = idsauth.NewClient(ks, hc).Login(ctx); err != nil {
+				return "", err
+			}
+			return ks.Username(), nil
+		}
 	}
-	p.logger.Info("IDS passkey login ok")
-
+	if _, err := authenticate(ctx, hc); err != nil {
+		return nil, nil, fmt.Errorf("identity authentication: %w", err)
+	}
 	sc := p.newSDPC(hc)
 	ac, err := sc.AuthConfig(ctx)
 	if err != nil {
@@ -607,7 +621,7 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 		gateways = gatewaysOverride
 	}
 	if len(gateways) == 0 {
-		gateways = DefaultGateways
+		return nil, fmt.Errorf("controller supplied no gateway addresses")
 	}
 	dns := p.cfg.DNS
 	if len(dns) == 0 {
@@ -624,14 +638,13 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 		Gateways:     gateways,
 		DNS:          dns,
 		Policy:       res,
-		AppID:        p.cfg.AppID,
 	}
 
 	records := make([]CookieRecord, 0, len(cred.Cookies))
 	for _, ck := range cred.Cookies {
 		records = append(records, CookieRecord{Name: ck.Name, Value: ck.Value})
 	}
-	if err := p.store.Save(&State{
+	if err := p.store.Save(ctx, &State{
 		SID:        cred.SID,
 		DeviceID:   cred.DeviceID,
 		CsrfToken:  cred.CsrfToken,
@@ -651,9 +664,16 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 
 // ShortSID redacts a session id for logs and command output: the sid is a
 // bearer credential and must not appear in full outside the state file.
-func ShortSID(sid string) string {
-	if len(sid) > 12 {
-		return sid[:12] + "…"
+func ShortSID(sid string) string { return "[redacted]" }
+
+// CloseObservers releases the bounded lifecycle dispatcher. Call after canceling
+// the owner's network operations. Late events are ignored.
+func (p *Provider) CloseObservers() {
+	p.dispMu.Lock()
+	defer p.dispMu.Unlock()
+	p.dispClosed = true
+	p.dispQueue = nil
+	if p.dispCond != nil {
+		p.dispCond.Broadcast()
 	}
-	return sid
 }

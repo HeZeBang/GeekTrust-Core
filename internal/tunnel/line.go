@@ -27,9 +27,10 @@ const (
 // Lines tracks an ordered gateway pool. The healthy preferred line starts
 // first, fallbacks join a staggered race, and failed lines enter cooldown.
 type Lines struct {
-	mu     sync.Mutex
-	addrs  []string
-	failed map[string]time.Time
+	DialContext func(context.Context, string, string) (net.Conn, error)
+	mu          sync.Mutex
+	addrs       []string
+	failed      map[string]time.Time
 	// offset marks the preferred starting point; Rotate advances it after
 	// line-switch error codes.
 	offset int
@@ -152,7 +153,7 @@ func (l *Lines) DialTLS(ctx context.Context) (net.Conn, string, error) {
 				}
 			}
 			attemptCtx, attemptCancel := context.WithTimeout(raceCtx, probeTimeout)
-			conn, err := probeGatewayTLS(attemptCtx, addr)
+			conn, err := probeGatewayTLSWithDialer(attemptCtx, addr, l.DialContext)
 			attemptCancel()
 			if raceCtx.Err() != nil && conn != nil {
 				conn.Close()
@@ -224,7 +225,13 @@ func (l *Lines) Best(ctx context.Context) (string, error) {
 }
 
 func probeGatewayTLS(ctx context.Context, addr string) (net.Conn, error) {
-	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	return probeGatewayTLSWithDialer(ctx, addr, nil)
+}
+func probeGatewayTLSWithDialer(ctx context.Context, addr string, dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	raw, err := dial(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}

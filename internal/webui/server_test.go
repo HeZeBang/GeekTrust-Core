@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"geektrust/internal/sdpc"
-	"geektrust/internal/session"
+	"github.com/nanakusa-electronics/geektrust/internal/sdpc"
+	"github.com/nanakusa-electronics/geektrust/internal/session"
 )
 
 type fakeProvider struct {

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"geektrust/internal/config"
-	"geektrust/internal/session"
+	"github.com/nanakusa-electronics/geektrust/internal/config"
+	"github.com/nanakusa-electronics/geektrust/internal/session"
 )
 
 func testConfig(clientType string) *config.Config {

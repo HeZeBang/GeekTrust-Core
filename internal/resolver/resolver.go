@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"geektrust/internal/session"
+	"github.com/nanakusa-electronics/geektrust/internal/session"
 )
 
 type TunnelDialer interface {
@@ -43,6 +43,14 @@ type Resolver struct {
 // New builds a Resolver. Controller-pushed or configured DNS servers are read
 // from the live credential and reached through tunnel.
 func New(provider session.CredentialProvider, tunnel TunnelDialer) *Resolver {
+	return NewWithDialer(provider, tunnel, nil)
+}
+
+// NewWithDialer allows a host to protect direct DNS traffic from tunnel routes.
+func NewWithDialer(provider session.CredentialProvider, tunnel TunnelDialer, dial func(context.Context, string, string) (net.Conn, error)) *Resolver {
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
 	pool := append([]string(nil), DefaultPublicDNS...)
 	var next atomic.Uint32
 	custom := &net.Resolver{
@@ -52,10 +60,10 @@ func New(provider session.CredentialProvider, tunnel TunnelDialer) *Resolver {
 			// answers over TCP, which needs the length-prefixed TCP
 			// exchange, not another UDP socket.
 			server := pool[(next.Add(1)-1)%uint32(len(pool))]
-			return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(server, "53"))
+			return dial(ctx, network, net.JoinHostPort(server, "53"))
 		},
 	}
-	return &Resolver{provider: provider, tunnel: tunnel, stages: []*net.Resolver{custom, net.DefaultResolver}}
+	return &Resolver{provider: provider, tunnel: tunnel, stages: []*net.Resolver{custom, {PreferGo: true, Dial: dial}}}
 }
 
 // Resolution is a resolved dial target.
@@ -99,14 +107,23 @@ func (r *Resolver) resolve(ctx context.Context, host string, port int, protocol 
 		}
 		return Resolution{
 			IP:    v4.String(),
-			AppID: cred.Policy.AppIDForProtocol(v4, port, cred.AppID, protocol),
+			AppID: cred.Policy.AppIDForProtocol(v4, port, "", protocol),
 		}, nil
 	}
 	if rule, ok := cred.Policy.MatchDomainProtocol(host, port, protocol); ok {
+		domain := ""
+		if rule.IP == "" {
+			ip, err := r.lookupIPv4(ctx, host, cred)
+			if err != nil {
+				return Resolution{}, err
+			}
+			rule.IP = ip.String()
+			domain = host
+		}
 		if isGatewayTarget(cred, host, net.ParseIP(rule.IP), port) {
 			return Resolution{}, fmt.Errorf("%w: %s", ErrGatewayLoop, net.JoinHostPort(host, strconv.Itoa(port)))
 		}
-		return Resolution{IP: rule.IP, AppID: rule.AppID}, nil
+		return Resolution{IP: rule.IP, AppID: rule.AppID, Domain: domain}, nil
 	}
 
 	v4, err := r.lookupIPv4(ctx, host, cred)
@@ -126,7 +143,7 @@ func routeDNSResult(cred *session.Credential, host string, port int, v4 net.IP, 
 	if rule, ok := cred.Policy.MatchSuffixProtocol(host, port, protocol); ok {
 		return Resolution{IP: v4.String(), AppID: rule.AppID, Domain: host}
 	}
-	return Resolution{IP: v4.String(), AppID: cred.AppID}
+	return Resolution{IP: v4.String()}
 }
 
 // lookupIPv4 first tries direct public/system resolution. If those stages
@@ -182,9 +199,12 @@ func (r *Resolver) tunnelResolver(cred *session.Credential, server string) *net.
 			if network == "tcp" || network == "tcp4" {
 				protocol = "tcp"
 			}
-			appID := cred.AppID
+			appID := ""
 			if cred.Policy != nil {
 				appID = cred.Policy.AppIDForProtocol(ip, 53, appID, protocol)
+			}
+			if appID == "" {
+				return nil, errors.New("DNS server is not authorized")
 			}
 			if protocol == "tcp" {
 				return r.tunnel.Dial(ctx, ip.String(), 53, appID, "")
@@ -221,4 +241,28 @@ var errNoIPv4Answer = errors.New("no usable IPv4 answer")
 func IsFakeIP(ip net.IP) bool {
 	v4 := ip.To4()
 	return v4 != nil && v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)
+}
+
+// LookupHost resolves without imposing a particular destination port.
+func (r *Resolver) LookupHost(ctx context.Context, host string) ([]string, error) {
+	cred, err := r.provider.Credential(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.To4() == nil {
+			return nil, errNoIPv4Answer
+		}
+		return []string{ip.String()}, nil
+	}
+	for _, rule := range cred.Policy.DomainRules {
+		if strings.EqualFold(strings.TrimSuffix(host, "."), rule.Domain) && rule.IP != "" {
+			return []string{rule.IP}, nil
+		}
+	}
+	ip, err := r.lookupIPv4(ctx, host, cred)
+	if err != nil {
+		return nil, err
+	}
+	return []string{ip.String()}, nil
 }

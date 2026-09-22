@@ -50,6 +50,9 @@ func NewClient(ks *Keystore, httpClient *http.Client) *Client {
 // challenge, POST the login form, verify the session, and persist the
 // incremented sign_count back to the keystore file.
 func (c *Client) Login(ctx context.Context) error {
+	if string(c.Keystore.magic) == string(ecnuMagic) {
+		return c.loginECNU(ctx)
+	}
 	execution, err := c.getExecution(ctx)
 	if err != nil {
 		return err
@@ -89,10 +92,6 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 	if !loggedIn {
 		return fmt.Errorf("ids login: session not established (login page did not accept the assertion)")
-	}
-	// Persist the incremented sign_count only after a verified login.
-	if err := c.Keystore.Save(); err != nil {
-		return fmt.Errorf("ids login: persist keystore: %w", err)
 	}
 	return nil
 }
@@ -183,6 +182,9 @@ func (c *Client) buildResponseJSON(ctx context.Context) ([]byte, error) {
 	// The counter advanced whether or not the login POST below succeeds;
 	// keeping the in-memory value monotonic is safe for the next attempt.
 	c.Keystore.SetSignCount(newCount)
+	if err := c.Keystore.Save(); err != nil {
+		return nil, err
+	}
 
 	var cred any
 	if err := json.Unmarshal(assertionJSON, &cred); err != nil {

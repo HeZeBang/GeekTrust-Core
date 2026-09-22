@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"geektrust/internal/session"
-	"geektrust/internal/tunnel"
+	"github.com/nanakusa-electronics/geektrust/internal/session"
+	"github.com/nanakusa-electronics/geektrust/internal/tunnel"
 )
 
 const (
@@ -27,9 +27,10 @@ const (
 // Dialer establishes authenticated IP flows through the tunnel. Inbound
 // proxies use TCP; the resolver also uses connected UDP for internal DNS.
 type Dialer struct {
-	Manager  *tunnel.Manager
-	Provider session.CredentialProvider
-	Logger   *slog.Logger
+	MaxAttempts int
+	Manager     *tunnel.Manager
+	Provider    session.CredentialProvider
+	Logger      *slog.Logger
 
 	stackMu sync.Mutex
 	stacks  map[*tunnel.Tunnel]*tcpStack
@@ -42,18 +43,16 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int, appID, domain st
 	if err := validateTarget(ip, port); err != nil {
 		return nil, err
 	}
-	conn, err := d.Manager.DialTCP(ctx, ip, port, appID, domain)
-	if err == nil {
-		return conn, nil
+	cred, err := d.Provider.Credential(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if !tunnel.ShouldFallbackToL3(err) {
-		return nil, fmt.Errorf("dial %s:%d through direct TCP tunnel: %w", ip, port, err)
+	if cred.Policy == nil || appID == "" {
+		return nil, fmt.Errorf("target has no authorizing application")
 	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	if !cred.Policy.AppTCPPreferL3[appID] {
+		return d.Manager.DialTCP(ctx, ip, port, appID, domain)
 	}
-	d.Logger.Warn("direct TCP tunnel unavailable; falling back to L3",
-		"ip", ip, "port", port, "err", err)
 	return d.dialWithRetry(ctx, "tcp", ip, port, func() (net.Conn, error) {
 		return d.dialOnce(ctx, ip, port, appID, domain)
 	})
@@ -84,7 +83,11 @@ func validateTarget(ip string, port int) error {
 func (d *Dialer) dialWithRetry(ctx context.Context, network, ip string, port int, dial func() (net.Conn, error)) (net.Conn, error) {
 	var lastErr error
 	attempts := 0
-	for attempt := range dialAttempts {
+	limit := d.MaxAttempts
+	if limit <= 0 {
+		limit = dialAttempts
+	}
+	for attempt := range limit {
 		attempts = attempt + 1
 		if attempt > 0 {
 			d.Logger.Debug("dial retry", "network", network, "ip", ip, "port", port,
@@ -144,7 +147,7 @@ type AuthRejectedError struct {
 }
 
 func (e *AuthRejectedError) Error() string {
-	return fmt.Sprintf("per-conn auth rejected: code %d: %s", e.Code, e.Message)
+	return fmt.Sprintf("per-conn auth rejected: code %d", e.Code)
 }
 
 func (d *Dialer) stackFor(tun *tunnel.Tunnel) (*tcpStack, error) {
@@ -184,16 +187,19 @@ func (f *authorizedFlow) release() {
 }
 
 func (d *Dialer) authorizeFlow(ctx context.Context, ip string, port int, appID, domain string, protocol int) (*authorizedFlow, error) {
-	tun, err := d.Manager.Tunnel(ctx)
-	if err != nil {
-		return nil, err
-	}
 	cred, err := d.Provider.Credential(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if appID == "" {
-		appID = cred.Policy.AppIDFor(net.ParseIP(ip).To4(), port, cred.AppID)
+		appID = cred.Policy.AppIDForProtocol(net.ParseIP(ip).To4(), port, "", map[int]string{6: "tcp", 17: "udp", 1: "icmp"}[protocol])
+		if appID == "" {
+			return nil, fmt.Errorf("target has no authorizing application")
+		}
+	}
+	tun, err := d.Manager.TunnelForApp(ctx, appID)
+	if err != nil {
+		return nil, err
 	}
 	transport, err := d.stackFor(tun)
 	if err != nil {

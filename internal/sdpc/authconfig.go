@@ -2,6 +2,7 @@ package sdpc
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 )
 
@@ -19,6 +20,10 @@ type AuthConfig struct {
 // for subsequent calls.
 func (c *Client) AuthConfig(ctx context.Context) (*AuthConfig, error) {
 	var data struct {
+		AuthServerInfoList []struct {
+			AuthType    string `json:"authType"`
+			LoginDomain string `json:"loginDomain"`
+		} `json:"authServerInfoList"`
 		Security struct {
 			CsrfToken string `json:"csrfToken"`
 		} `json:"security"`
@@ -38,6 +43,17 @@ func (c *Client) AuthConfig(ctx context.Context) (*AuthConfig, error) {
 		return nil, &APIError{Op: "authConfig", Code: -1, Message: "response missing security.csrfToken"}
 	}
 	c.csrf = data.Security.CsrfToken
+	if c.LoginDomain == "" {
+		for _, method := range data.AuthServerInfoList {
+			if method.AuthType != "auth/cas" || method.LoginDomain == "" {
+				continue
+			}
+			if c.LoginDomain != "" && c.LoginDomain != method.LoginDomain {
+				return nil, fmt.Errorf("multiple CAS login domains; select login_domain explicitly")
+			}
+			c.LoginDomain = method.LoginDomain
+		}
+	}
 	exp := data.AntiMITMAttackData.DevicePubKeyExp
 	if exp == "" {
 		exp = "10001"

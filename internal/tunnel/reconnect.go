@@ -3,14 +3,16 @@ package tunnel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"geektrust/internal/frame"
-	"geektrust/internal/session"
+	"github.com/nanakusa-electronics/geektrust/internal/frame"
+	"github.com/nanakusa-electronics/geektrust/internal/session"
 )
 
 const (
@@ -22,8 +24,12 @@ const (
 // backoff, switches gateway lines on tunnel-layer error codes, and forces a
 // silent re-login when tunnel authentication keeps rejecting the session.
 type Manager struct {
-	provider session.CredentialProvider
-	logger   *slog.Logger
+	groupsMu    sync.Mutex
+	groups      map[string]*Manager
+	MaxAttempts int
+	DialContext func(context.Context, string, string) (net.Conn, error)
+	provider    session.CredentialProvider
+	logger      *slog.Logger
 
 	linesMu  sync.Mutex
 	lines    *Lines
@@ -34,9 +40,11 @@ type Manager struct {
 	// fresh multi-line race for every proxied connection.
 	directLines map[string]*Lines
 
-	mu         sync.Mutex
-	cur        *Tunnel
-	connecting *connectCall
+	closed        bool
+	connectCancel context.CancelFunc
+	mu            sync.Mutex
+	cur           *Tunnel
+	connecting    *connectCall
 }
 
 // connectCall is one in-flight connect shared by every concurrent caller:
@@ -57,11 +65,24 @@ func NewManager(provider session.CredentialProvider, logger *slog.Logger) *Manag
 // session is closed and re-established. Concurrent callers share one
 // in-flight connect attempt.
 func (m *Manager) Tunnel(ctx context.Context) (*Tunnel, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return nil, ErrTunnelDead
+	}
 	cred, err := m.provider.Credential(ctx)
 	if err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, ErrTunnelDead
+	}
 	if t := m.cur; t != nil && t.Alive() && t.SID() == cred.SID {
 		m.mu.Unlock()
 		return t, nil
@@ -75,11 +96,21 @@ func (m *Manager) Tunnel(ctx context.Context) (*Tunnel, error) {
 	if call == nil {
 		call = &connectCall{done: make(chan struct{})}
 		m.connecting = call
+		connectCtx, cancel := context.WithCancel(ctx)
+		m.connectCancel = cancel
 		m.mu.Unlock()
 
-		t, err := m.connect(ctx)
+		t, err := m.connect(connectCtx)
+		cancel()
 
 		m.mu.Lock()
+		m.connectCancel = nil
+		if m.closed {
+			if t != nil {
+				t.Close()
+			}
+			t, err = nil, ErrTunnelDead
+		}
 		if err == nil {
 			m.cur = t
 		}
@@ -123,10 +154,20 @@ func (m *Manager) SwitchLine() {
 
 // Close shuts down the current tunnel without reconnecting.
 func (m *Manager) Close() {
+	m.groupsMu.Lock()
 	m.mu.Lock()
+	m.closed = true
+	if m.connectCancel != nil {
+		m.connectCancel()
+	}
 	t := m.cur
 	m.cur = nil
 	m.mu.Unlock()
+	for _, g := range m.groups {
+		g.Close()
+	}
+	m.groups = nil
+	m.groupsMu.Unlock()
 	if t != nil {
 		t.Close()
 	}
@@ -146,7 +187,11 @@ func (m *Manager) connect(ctx context.Context) (*Tunnel, error) {
 	authRejects := make(map[string]int64)
 	tried := make(map[string]bool)
 	rejectSID := ""
-	for {
+	limit := m.MaxAttempts
+	if limit <= 0 {
+		limit = 3
+	}
+	for attempt := 0; attempt < limit; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -202,6 +247,9 @@ func (m *Manager) connect(ctx context.Context) (*Tunnel, error) {
 			}
 		}
 
+		if attempt+1 == limit {
+			return nil, fmt.Errorf("tunnel connection failed after %d attempts", limit)
+		}
 		m.logger.Info("tunnel reconnect backoff", "delay", backoff)
 		timer := time.NewTimer(backoff)
 		select {
@@ -214,6 +262,7 @@ func (m *Manager) connect(ctx context.Context) (*Tunnel, error) {
 			backoff = reconnectMax
 		}
 	}
+	return nil, errors.New("tunnel attempts exhausted")
 }
 
 // ensureLines rebuilds the line pool when the credential's gateway list
@@ -224,6 +273,7 @@ func (m *Manager) ensureLines(gateways []string) *Lines {
 	if m.lines == nil || !slices.Equal(m.gateways, gateways) {
 		m.gateways = append([]string(nil), gateways...)
 		m.lines = NewLines(gateways)
+		m.lines.DialContext = m.DialContext
 		m.logger.Debug("gateway line pool updated", "lines", gateways)
 	}
 	return m.lines
@@ -238,6 +288,7 @@ func (m *Manager) ensureDirectLines(gateways []string) *Lines {
 	}
 	if m.directLines[key] == nil {
 		m.directLines[key] = NewLines(gateways)
+		m.directLines[key].DialContext = m.DialContext
 	}
 	return m.directLines[key]
 }
@@ -250,4 +301,64 @@ func (m *Manager) Lines() []string {
 		return nil
 	}
 	return m.lines.Addrs()
+}
+
+type appProvider struct {
+	session.CredentialProvider
+	appID string
+}
+
+func (p appProvider) Credential(ctx context.Context) (*session.Credential, error) {
+	c, err := p.CredentialProvider.Credential(ctx)
+	if err != nil {
+		return nil, err
+	}
+	copy := *c
+	copy.Original = c
+	copy.Gateways = c.Policy.GatewaysForApp(p.appID)
+	return &copy, nil
+}
+func (p appProvider) InvalidateIfCurrent(c *session.Credential) bool {
+	if c.Original == nil {
+		return false
+	}
+	return p.CredentialProvider.InvalidateIfCurrent(c.Original)
+}
+
+// TunnelForApp keeps L3 traffic within the target application's gateway group.
+func (m *Manager) TunnelForApp(ctx context.Context, appID string) (*Tunnel, error) {
+	c, err := m.provider.Credential(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if c.Policy == nil {
+		return nil, errors.New("missing resource policy")
+	}
+	group := c.Policy.AppNodeGroups[appID]
+	if group == "" {
+		group = c.Policy.MajorNodeGroup
+	}
+	if group == "" {
+		return m.Tunnel(ctx)
+	}
+	m.groupsMu.Lock()
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		m.groupsMu.Unlock()
+		return nil, ErrTunnelDead
+	}
+	if m.groups == nil {
+		m.groups = make(map[string]*Manager)
+	}
+	g := m.groups[group]
+	if g == nil {
+		g = NewManager(appProvider{m.provider, appID}, m.logger)
+		g.MaxAttempts = m.MaxAttempts
+		g.DialContext = m.DialContext
+		m.groups[group] = g
+	}
+	m.groupsMu.Unlock()
+	return g.Tunnel(ctx)
 }

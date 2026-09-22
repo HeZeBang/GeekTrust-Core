@@ -5,12 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/nanakusa-electronics/geektrust/internal/privatefile"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"geektrust/internal/config"
+	"github.com/nanakusa-electronics/geektrust/internal/config"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -112,8 +113,8 @@ func validateInitDirectory(name, path string) error {
 			// A directory entry can be replaced by anyone who can write its
 			// parent. Check every existing ancestor before creating or
 			// replacing any config or credential file.
-			if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
-				return fmt.Errorf("%s directory ancestor %s is writable by other users", name, dir)
+			if err := privatefile.CheckDirectory(dir); err != nil {
+				return fmt.Errorf("%s directory ancestor %s: %w", name, dir, err)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("inspect %s directory: %w", name, err)
@@ -184,7 +185,7 @@ func bindPasskeyKeystore(ctx context.Context, uvx, destination string) error {
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := privatefile.Protect(tmpPath); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("secure temporary keystore: %w", err)
 	}
@@ -207,7 +208,7 @@ func bindPasskeyKeystore(ctx context.Context, uvx, destination string) error {
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 		return fmt.Errorf("passkey binding completed without creating a valid keystore")
 	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
+	if err := privatefile.Protect(tmpPath); err != nil {
 		return fmt.Errorf("secure bound keystore: %w", err)
 	}
 	// Linking within the same directory installs the completed file
@@ -286,7 +287,7 @@ func cmdInit(ctx context.Context, configPath string, args []string) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("keystore %s is not a regular file", prepared.Keystore)
 		}
-		if err := os.Chmod(prepared.Keystore, 0o600); err != nil {
+		if err := privatefile.Protect(prepared.Keystore); err != nil {
 			return fmt.Errorf("secure existing keystore: %w", err)
 		}
 		keystoreExists = true

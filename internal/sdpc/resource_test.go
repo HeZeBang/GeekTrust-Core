@@ -275,8 +275,8 @@ func TestGatewaysForApp(t *testing.T) {
 		t.Fatalf("major fallback gateways = %v", got)
 	}
 	res.NodeGroups = nil
-	if got := res.GatewaysForApp("app"); len(got) != 1 || got[0] != "flat:441" {
-		t.Fatalf("flat fallback gateways = %v", got)
+	if got := res.GatewaysForApp("app"); len(got) != 0 {
+		t.Fatalf("missing assigned group escaped to gateways = %v", got)
 	}
 }
 
@@ -287,7 +287,7 @@ func TestParsePortRange(t *testing.T) {
 		"8000-9000": {8000, 9000},
 		"":          {0, 65535},
 		"all":       {0, 65535},
-		"junk":      {0, 65535},
+		"junk":      {1, 0},
 	}
 	for in, want := range cases {
 		if got := parsePortRange(in); got != want {

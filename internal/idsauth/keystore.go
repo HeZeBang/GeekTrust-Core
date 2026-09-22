@@ -8,7 +8,9 @@ import (
 	"compress/zlib"
 	"encoding/json"
 	"fmt"
+	"github.com/nanakusa-electronics/geektrust/internal/privatefile"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 )
@@ -16,13 +18,16 @@ import (
 // keystoreMagic prefixes every default-format keystore file
 // ("SHTUIDSPASSKEY" + 0x01), followed by zlib-compressed JSON.
 var keystoreMagic = []byte("SHTUIDSPASSKEY\x01")
+var ecnuMagic = []byte("ECNUSSOPASSKEY\x01")
 
 // Keystore is a passkey credential store compatible with the Python library's
 // default binary format. All fields (including unrecognized ones) are kept in
 // raw so a write-back never drops data the Python from_dict would require.
 type Keystore struct {
-	path string
-	raw  map[string]any
+	path    string
+	magic   []byte
+	persist func([]byte) error
+	raw     map[string]any
 }
 
 // LoadKeystore reads and decodes a keystore file.
@@ -31,15 +36,33 @@ func LoadKeystore(path string) (*Keystore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read keystore: %w", err)
 	}
-	if !bytes.HasPrefix(blob, keystoreMagic) {
-		return nil, fmt.Errorf("keystore %s: unsupported format (missing magic); use the default binary format produced by `shanghaitech-ids-passkey bind`", path)
+	k, err := ParseKeystore(blob, func(data []byte) error { return writeFileAtomic(path, data, 0o600) })
+	if err == nil {
+		k.path = path
 	}
-	zr, err := zlib.NewReader(bytes.NewReader(blob[len(keystoreMagic):]))
+	return k, err
+}
+
+// ParseKeystore decodes a credential without requiring filesystem access.
+// persist must durably save the updated counter before an assertion is sent.
+func ParseKeystore(blob []byte, persist func([]byte) error) (*Keystore, error) {
+	path := "credential"
+	magic := keystoreMagic
+	if bytes.HasPrefix(blob, ecnuMagic) {
+		magic = ecnuMagic
+	}
+	if !bytes.HasPrefix(blob, magic) {
+		return nil, fmt.Errorf("unsupported keystore format")
+	}
+	zr, err := zlib.NewReader(bytes.NewReader(blob[len(magic):]))
 	if err != nil {
 		return nil, fmt.Errorf("keystore %s: zlib: %w", path, err)
 	}
 	defer zr.Close()
-	payload, err := io.ReadAll(zr)
+	payload, err := io.ReadAll(io.LimitReader(zr, (1<<20)+1))
+	if len(payload) > 1<<20 {
+		return nil, fmt.Errorf("keystore exceeds size limit")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("keystore %s: decompress: %w", path, err)
 	}
@@ -52,7 +75,7 @@ func LoadKeystore(path string) (*Keystore, error) {
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("keystore %s: decode json: %w", path, err)
 	}
-	k := &Keystore{path: path, raw: raw}
+	k := &Keystore{raw: raw, magic: magic, persist: persist}
 	if err := k.validate(); err != nil {
 		return nil, fmt.Errorf("keystore %s: %w", path, err)
 	}
@@ -61,12 +84,22 @@ func LoadKeystore(path string) (*Keystore, error) {
 
 func (k *Keystore) validate() error {
 	for _, field := range []string{
-		"username", "anon_biometrics_id", "device_name", "base_url",
+		"username", "device_name", "base_url",
 		"credential_id", "rp_id", "user_id", "private_key_pem",
 	} {
 		if s, _ := k.raw[field].(string); s == "" {
 			return fmt.Errorf("missing or empty field %q", field)
 		}
+	}
+	u, err := url.Parse(k.BaseURL())
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return fmt.Errorf("credential base_url must be an HTTPS origin")
+	}
+	if !rpIDMatchesOrigin(k.RpID(), k.BaseURL()) {
+		return fmt.Errorf("credential RP ID does not match origin")
+	}
+	if !bytes.Equal(k.magic, ecnuMagic) && k.AnonBiometricsID() == "" {
+		return fmt.Errorf("missing anon_biometrics_id")
 	}
 	if _, err := k.alg(); err != nil {
 		return err
@@ -158,7 +191,11 @@ func (k *Keystore) Save() error {
 		return fmt.Errorf("encode keystore: %w", err)
 	}
 	var buf bytes.Buffer
-	buf.Write(keystoreMagic)
+	magic := k.magic
+	if len(magic) == 0 {
+		magic = keystoreMagic
+	}
+	buf.Write(magic)
 	zw := zlib.NewWriter(&buf)
 	if _, err := zw.Write(payload); err != nil {
 		return fmt.Errorf("compress keystore: %w", err)
@@ -166,7 +203,14 @@ func (k *Keystore) Save() error {
 	if err := zw.Close(); err != nil {
 		return fmt.Errorf("compress keystore: %w", err)
 	}
-	if err := writeFileAtomic(k.path, buf.Bytes(), 0o600); err != nil {
+	save := k.persist
+	if save == nil && k.path == "" {
+		return fmt.Errorf("credential persistence is required")
+	}
+	if save == nil {
+		save = func(data []byte) error { return writeFileAtomic(k.path, data, 0o600) }
+	}
+	if err := save(buf.Bytes()); err != nil {
 		return fmt.Errorf("write keystore: %w", err)
 	}
 	return nil
@@ -195,6 +239,10 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
+	if err := privatefile.Protect(tmpName); err != nil {
+		tmp.Close()
+		return err
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err

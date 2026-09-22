@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -156,6 +157,9 @@ func TestKeystoreMissingField(t *testing.T) {
 }
 
 func TestKeystoreFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode assertion; Windows uses ACLs")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mode.keystore")
 	if err := os.WriteFile(path, pythonFormat(t, testKeystoreMap(t)), 0o644); err != nil {
