@@ -4,6 +4,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -29,6 +30,13 @@ import (
 type BlobStore interface {
 	Load(context.Context) ([]byte, error)
 	Save(context.Context, []byte) error
+}
+
+// GatewayTrustStore persists SHA-256 SPKI pins for private-CA gateways.
+// An empty LoadPin result enrolls the first observed public key.
+type GatewayTrustStore interface {
+	LoadPin(context.Context, string) ([]byte, error)
+	SavePin(context.Context, string, []byte) error
 }
 type Authenticator interface {
 	Authenticate(context.Context, *http.Client) (string, error)
@@ -75,27 +83,42 @@ func (p *PasskeyAuthenticator) Authenticate(ctx context.Context, h *http.Client)
 	return k.Username(), nil
 }
 
+type PasskeyInfo struct {
+	Kind     string
+	Username string
+	Origin   string
+}
+
+// InspectPasskey validates a credential and exposes only non-secret metadata.
+func InspectPasskey(b []byte) (PasskeyInfo, error) {
+	k, err := idsauth.ParseKeystore(b, nil)
+	if err != nil {
+		return PasskeyInfo{}, errors.New("invalid passkey credential")
+	}
+	return PasskeyInfo{Kind: k.Kind(), Username: k.Username(), Origin: k.BaseURL()}, nil
+}
+
 // ValidatePasskey validates an imported credential without authenticating it.
 func ValidatePasskey(b []byte) error {
-	_, err := idsauth.ParseKeystore(b, nil)
-	if err != nil {
-		return errors.New("invalid passkey credential")
-	}
-	return nil
+	_, err := InspectPasskey(b)
+	return err
 }
 
 type Options struct {
-	ControllerURL string
-	DeviceID      string
-	Platform      string
-	LoginDomain   string
-	ClientMode    bool
-	Authenticator Authenticator
-	SessionStore  BlobStore
-	Transport     http.RoundTripper
-	DialContext   func(context.Context, string, string) (net.Conn, error)
-	Logger        *slog.Logger
-	PromptSMS     func(context.Context) (string, error)
+	ControllerURL         string
+	DeviceID              string
+	Platform              string
+	LoginDomain           string
+	ClientMode            bool
+	Authenticator         Authenticator
+	SessionStore          BlobStore
+	Transport             http.RoundTripper
+	DialContext           func(context.Context, string, string) (net.Conn, error)
+	DisableSystemResolver bool
+	GatewayTLSConfig      *tls.Config
+	GatewayTrustStore     GatewayTrustStore
+	Logger                *slog.Logger
+	PromptSMS             func(context.Context) (string, error)
 }
 
 type Capabilities struct{ IPv4TCP, IPv4UDP, IPv4ICMP, IPv6Targets, IPv6Gateway bool }
@@ -107,6 +130,10 @@ type Info struct {
 	Gateways, DNS []string
 	Resources     []Resource
 	Capabilities  Capabilities
+}
+type TransportInfo struct {
+	Gateway     string
+	VirtualIPv4 string
 }
 type EventKind string
 
@@ -177,9 +204,11 @@ func New(opts Options) (*Client, error) {
 	m := tunnel.NewManager(p, opts.Logger)
 	m.MaxAttempts = 1
 	m.DialContext = opts.DialContext
+	m.GatewayTLSConfig = opts.GatewayTLSConfig
+	m.GatewayTrustStore = opts.GatewayTrustStore
 	d := &l3.Dialer{Manager: m, Provider: p, Logger: opts.Logger, MaxAttempts: 1}
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &Client{transport: ownedTransport, provider: p, manager: m, dialer: d, resolver: resolver.NewWithDialer(p, d, opts.DialContext), ctx: ctx, cancel: cancel, conns: make(map[*ownedConn]struct{}), events: make(chan Event, 16)}
+	c := &Client{transport: ownedTransport, provider: p, manager: m, dialer: d, resolver: resolver.NewWithDialerOptions(p, d, opts.DialContext, opts.DisableSystemResolver), ctx: ctx, cancel: cancel, conns: make(map[*ownedConn]struct{}), events: make(chan Event, 16)}
 	p.AddObserver(clientObserver{c})
 	go p.CheckLoop(ctx, 5*time.Minute)
 	return c, nil
@@ -241,6 +270,26 @@ func (c *Client) Connect(parent context.Context) (Info, error) {
 		info.Resources = append(info.Resources, Resource{Address: "*" + r.Suffix, Protocol: r.Proto, ApplicationID: r.AppID, GatewayGroup: cred.Policy.AppNodeGroups[r.AppID], PortMin: r.Port.Min, PortMax: r.Port.Max})
 	}
 	return info, nil
+}
+
+// OpenTransport authenticates an L3 gateway without creating a system TUN or
+// requesting access to any particular resource. Embedders can call it before
+// advertising a connected packet-facing session.
+func (c *Client) OpenTransport(parent context.Context) (TransportInfo, error) {
+	if c.isClosed() {
+		return TransportInfo{}, ErrClosed
+	}
+	ctx, done := c.operation(parent)
+	defer done()
+	t, err := c.manager.Tunnel(ctx)
+	if err != nil {
+		return TransportInfo{}, err
+	}
+	ip := t.VIP().To4()
+	if ip == nil {
+		return TransportInfo{}, errors.New("gateway did not assign an IPv4 virtual address")
+	}
+	return TransportInfo{Gateway: t.Addr(), VirtualIPv4: ip.String()}, nil
 }
 
 func (c *Client) DialContext(parent context.Context, network, address string) (net.Conn, error) {

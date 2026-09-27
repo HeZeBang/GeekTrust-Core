@@ -48,6 +48,13 @@ func New(provider session.CredentialProvider, tunnel TunnelDialer) *Resolver {
 
 // NewWithDialer allows a host to protect direct DNS traffic from tunnel routes.
 func NewWithDialer(provider session.CredentialProvider, tunnel TunnelDialer, dial func(context.Context, string, string) (net.Conn, error)) *Resolver {
+	return NewWithDialerOptions(provider, tunnel, dial, false)
+}
+
+// NewWithDialerOptions can omit the host system resolver when an embedding
+// application has installed its own VPN DNS endpoint. This prevents recursive
+// queries back into the application's Fake-IP DNS service.
+func NewWithDialerOptions(provider session.CredentialProvider, tunnel TunnelDialer, dial func(context.Context, string, string) (net.Conn, error), disableSystem bool) *Resolver {
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext
 	}
@@ -63,7 +70,11 @@ func NewWithDialer(provider session.CredentialProvider, tunnel TunnelDialer, dia
 			return dial(ctx, network, net.JoinHostPort(server, "53"))
 		},
 	}
-	return &Resolver{provider: provider, tunnel: tunnel, stages: []*net.Resolver{custom, {PreferGo: true, Dial: dial}}}
+	stages := []*net.Resolver{custom}
+	if !disableSystem {
+		stages = append(stages, &net.Resolver{PreferGo: true, Dial: dial})
+	}
+	return &Resolver{provider: provider, tunnel: tunnel, stages: stages}
 }
 
 // Resolution is a resolved dial target.

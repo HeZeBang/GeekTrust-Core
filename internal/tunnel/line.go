@@ -27,10 +27,12 @@ const (
 // Lines tracks an ordered gateway pool. The healthy preferred line starts
 // first, fallbacks join a staggered race, and failed lines enter cooldown.
 type Lines struct {
-	DialContext func(context.Context, string, string) (net.Conn, error)
-	mu          sync.Mutex
-	addrs       []string
-	failed      map[string]time.Time
+	DialContext       func(context.Context, string, string) (net.Conn, error)
+	TLSConfig         *tls.Config
+	GatewayTrustStore GatewayTrustStore
+	mu                sync.Mutex
+	addrs             []string
+	failed            map[string]time.Time
 	// offset marks the preferred starting point; Rotate advances it after
 	// line-switch error codes.
 	offset int
@@ -153,7 +155,7 @@ func (l *Lines) DialTLS(ctx context.Context) (net.Conn, string, error) {
 				}
 			}
 			attemptCtx, attemptCancel := context.WithTimeout(raceCtx, probeTimeout)
-			conn, err := probeGatewayTLSWithDialer(attemptCtx, addr, l.DialContext)
+			conn, err := probeGatewayTLSWithDialer(attemptCtx, addr, l.DialContext, l.TLSConfig, l.GatewayTrustStore)
 			attemptCancel()
 			if raceCtx.Err() != nil && conn != nil {
 				conn.Close()
@@ -225,9 +227,9 @@ func (l *Lines) Best(ctx context.Context) (string, error) {
 }
 
 func probeGatewayTLS(ctx context.Context, addr string) (net.Conn, error) {
-	return probeGatewayTLSWithDialer(ctx, addr, nil)
+	return probeGatewayTLSWithDialer(ctx, addr, nil, nil, nil)
 }
-func probeGatewayTLSWithDialer(ctx context.Context, addr string, dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
+func probeGatewayTLSWithDialer(ctx context.Context, addr string, dial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config, trust GatewayTrustStore) (net.Conn, error) {
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext
 	}
@@ -235,7 +237,7 @@ func probeGatewayTLSWithDialer(ctx context.Context, addr string, dial func(conte
 	if err != nil {
 		return nil, err
 	}
-	conn := tls.Client(raw, gatewayTLSConfig(addr))
+	conn := tls.Client(raw, gatewayTLSConfigWithTrust(ctx, addr, tlsConfig, trust))
 	if err := conn.HandshakeContext(ctx); err != nil {
 		raw.Close()
 		return nil, err

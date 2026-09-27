@@ -113,6 +113,13 @@ func (k *Keystore) validate() error {
 // Path returns the file this keystore was loaded from.
 func (k *Keystore) Path() string { return k.path }
 
+func (k *Keystore) Kind() string {
+	if bytes.Equal(k.magic, ecnuMagic) {
+		return "ecnu"
+	}
+	return "shanghaitech"
+}
+
 func (k *Keystore) str(field string) string { s, _ := k.raw[field].(string); return s }
 
 func (k *Keystore) alg() (int, error) {
