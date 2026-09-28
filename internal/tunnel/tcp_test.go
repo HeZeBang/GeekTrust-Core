@@ -198,3 +198,14 @@ func TestDirectGatewaysUsesAssignedNodeGroup(t *testing.T) {
 		t.Fatalf("override escaped assigned group = %v", got)
 	}
 }
+
+func TestLegacyTCPFallbackBoundaries(t *testing.T) {
+	for _, err := range []error{nil, context.Canceled, context.DeadlineExceeded, &TCPStatusError{Status: 0x03}, &TCPStatusError{Status: 0x04}, &TCPStatusError{Status: 0x05}, &TCPStatusError{Status: 0x06}} {
+		if ShouldFallbackToL3(err) {
+			t.Fatalf("unexpected fallback: %v", err)
+		}
+	}
+	if !ShouldFallbackToL3(&TCPStatusError{Status: 0x02}) || !ShouldFallbackToL3(io.EOF) {
+		t.Fatal("legacy protocol/setup fallback removed")
+	}
+}

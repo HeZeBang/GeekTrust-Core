@@ -26,6 +26,10 @@ import (
 )
 
 const (
+	ipProtocolICMP = 1
+	ipProtocolTCP  = 6
+	ipProtocolUDP  = 17
+
 	// HeartbeatInterval is the 0x15 send period.
 	HeartbeatInterval = 20 * time.Second
 	// heartbeatWriteTimeout detects a wedged serialized write path promptly.
@@ -569,7 +573,7 @@ func (t *Tunnel) handleAuthResponse(payload []byte) {
 // dispatch routes a downlink IPv4 TCP or UDP packet to the flow owning its
 // destination port (our virtual source port).
 func (t *Tunnel) dispatch(pkt []byte) {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 || (pkt[9] != 6 && pkt[9] != 17 && pkt[9] != 1) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || (pkt[9] != ipProtocolTCP && pkt[9] != ipProtocolUDP && pkt[9] != ipProtocolICMP) {
 		return
 	}
 	ihl := int(pkt[0]&0x0F) * 4
@@ -577,7 +581,7 @@ func (t *Tunnel) dispatch(pkt []byte) {
 		return
 	}
 	dport := binary.BigEndian.Uint16(pkt[ihl+2 : ihl+4])
-	if pkt[9] == 1 {
+	if pkt[9] == ipProtocolICMP {
 		if len(pkt) < ihl+8 || pkt[ihl] != 0 {
 			return
 		}

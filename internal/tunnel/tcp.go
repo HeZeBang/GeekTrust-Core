@@ -107,6 +107,26 @@ func (e *TCPStatusError) Unwrap() error {
 	}
 }
 
+// ShouldFallbackToL3 reports whether the direct TCP setup failed before a
+// definitive target-network result. It keeps compatibility with gateways that
+// do not expose the TCP proxy command while preserving refusal/unreachable
+// errors from gateways that do.
+func ShouldFallbackToL3(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var status *TCPStatusError
+	if !errors.As(err, &status) {
+		return true
+	}
+	switch status.Status {
+	case 0x03, 0x04, 0x05, 0x06:
+		return false
+	default:
+		return true
+	}
+}
+
 // DialTCP opens an aTrust TCP proxy connection. TCP uses the server's stream
 // tunnel rather than the packet-oriented L3 tunnel; UDP remains on L3.
 func (m *Manager) DialTCP(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
@@ -121,7 +141,7 @@ func (m *Manager) DialTCP(ctx context.Context, ip string, port int, appID, domai
 		return nil, err
 	}
 	if appID == "" && cred.Policy != nil {
-		appID = cred.Policy.AppIDFor(net.ParseIP(ip).To4(), port, "")
+		appID = cred.Policy.AppIDFor(net.ParseIP(ip).To4(), port, cred.AppID)
 	}
 	if appID == "" {
 		return nil, errors.New("target has no authorizing application")
@@ -159,10 +179,7 @@ func (m *Manager) DialTCP(ctx context.Context, ip string, port int, appID, domai
 }
 
 func directGateways(cred *session.Credential, appID string) []string {
-	if cred.Policy != nil {
-		return cred.Policy.GatewaysForApp(appID)
-	}
-	return nil
+	return cred.GatewaysForApp(appID)
 }
 
 func establishTCP(ctx context.Context, conn net.Conn, cred *session.Credential, ip string, port int, appID, domain string) (result net.Conn, err error) {

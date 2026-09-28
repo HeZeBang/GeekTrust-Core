@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -19,6 +20,11 @@ const DefaultDeviceID = "84B5B45FE73EC0036C3E97717308447F"
 // DefaultBaseURL is the ShanghaiTech aTrust controller.
 const DefaultBaseURL = "https://vpn.shanghaitech.edu.cn"
 
+// DefaultAppID preserves the legacy ShanghaiTech fallback for incomplete policies.
+const DefaultAppID = "681165d0-1c77-11ed-8650-cd35a51aa42a"
+
+const DefaultLoginDomain = "Shanghaitech.edu.cn"
+
 // DefaultWebListen is the default loopback address of the status panel.
 const DefaultWebListen = "127.0.0.1:8081"
 
@@ -29,6 +35,7 @@ type Config struct {
 	BaseURL     string    `toml:"base_url"`
 	Platform    string    `toml:"platform"`
 	ClientType  string    `toml:"client_type"`
+	AppID       string    `toml:"app_id"`
 	LoginDomain string    `toml:"login_domain"`
 	Gateways    []string  `toml:"gateways"`
 	DNS         []string  `toml:"dns"`
@@ -102,6 +109,7 @@ func (c *Config) applyDefaults() {
 		c.ClientType = "browser"
 	}
 	c.BaseURL = strings.TrimRight(c.BaseURL, "/")
+	c.ApplyControllerDefaults()
 	if c.Web.Listen == "" {
 		c.Web.Listen = DefaultWebListen
 	}
@@ -226,4 +234,32 @@ func SplitHostPort(addr string) (host string, port string, err error) {
 		port = "441"
 	}
 	return host, port, nil
+}
+
+// IsShanghaiTech limits legacy fallbacks to the original supported controller.
+func (c *Config) IsShanghaiTech() bool {
+	u, err := url.Parse(c.BaseURL)
+	return err == nil && strings.EqualFold(u.Hostname(), "vpn.shanghaitech.edu.cn")
+}
+
+// ApplyControllerDefaults also applies when the configuration is built by the client package.
+func (c *Config) ApplyControllerDefaults() {
+	if !c.IsShanghaiTech() {
+		return
+	}
+	if c.AppID == "" {
+		c.AppID = DefaultAppID
+	}
+	if c.LoginDomain == "" {
+		c.LoginDomain = DefaultLoginDomain
+	}
+}
+
+// GatewayServerName preserves the certificate identity used by ShanghaiTech's
+// IP-addressed gateways without disabling certificate verification.
+func (c *Config) GatewayServerName() string {
+	if c.IsShanghaiTech() {
+		return "vpn.shanghaitech.edu.cn"
+	}
+	return ""
 }

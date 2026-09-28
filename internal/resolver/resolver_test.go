@@ -109,9 +109,10 @@ func TestResolveUDPUsesUDPPolicy(t *testing.T) {
 }
 
 type localDNSTunnel struct {
-	server *net.UDPAddr
-	ip     string
-	appID  string
+	blockedIP string
+	server    *net.UDPAddr
+	ip        string
+	appID     string
 }
 
 func (d *localDNSTunnel) Dial(context.Context, string, int, string, string) (net.Conn, error) {
@@ -119,6 +120,9 @@ func (d *localDNSTunnel) Dial(context.Context, string, int, string, string) (net
 }
 
 func (d *localDNSTunnel) DialUDP(_ context.Context, ip string, _ int, appID, _ string) (net.Conn, error) {
+	if ip == d.blockedIP {
+		return nil, errors.New("synthetic unavailable primary DNS")
+	}
 	d.ip, d.appID = ip, appID
 	return net.DialUDP("udp4", nil, d.server)
 }
@@ -162,13 +166,14 @@ func TestResolveFallsBackToControllerDNSThroughTunnel(t *testing.T) {
 	}()
 
 	cred := &session.Credential{
-		DNS: []string{"10.13.87.17"},
+		DNS: []string{"10.0.0.1", "10.13.87.17"},
 		Policy: &sdpc.Resource{IPRules: []sdpc.IPRule{
+			{IP: net.ParseIP("10.0.0.1"), AppID: "primary-dns-app", Proto: "udp", Port: sdpc.PortRange{Min: 53, Max: 53}},
 			{IP: net.ParseIP("10.13.87.17"), AppID: "dns-app", Proto: "udp", Port: sdpc.PortRange{Min: 53, Max: 53}},
 			{IP: net.ParseIP("10.20.30.40"), AppID: "web-app", Proto: "tcp", Port: sdpc.PortRange{Min: 443, Max: 443}},
 		}},
 	}
-	tunnel := &localDNSTunnel{server: server.LocalAddr().(*net.UDPAddr)}
+	tunnel := &localDNSTunnel{server: server.LocalAddr().(*net.UDPAddr), blockedIP: "10.0.0.1"}
 	r := New(&staticProvider{cred: cred}, tunnel)
 	r.stages = nil // isolate the split-horizon fallback from real network DNS
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

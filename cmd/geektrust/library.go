@@ -18,6 +18,7 @@ func commandClient(cfg *config.Config, logger *slog.Logger) (*client.Client, err
 	return client.New(client.Options{
 		ControllerURL: cfg.BaseURL, DeviceID: cfg.DeviceID, Platform: cfg.Platform,
 		LoginDomain: cfg.LoginDomain, ClientMode: cfg.ClientType == "client",
+		AppID: cfg.AppID, Gateways: cfg.Gateways, DNS: cfg.DNS,
 		Logger: logger, PromptSMS: smsPrompt,
 		SessionStore: commandSessionStore{session.NewStore(cfg.StateFile)},
 		Authenticator: client.AuthenticatorFunc(func(ctx context.Context, h *http.Client) (string, error) {

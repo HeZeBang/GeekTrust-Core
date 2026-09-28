@@ -105,6 +105,9 @@ func ValidatePasskey(b []byte) error {
 }
 
 type Options struct {
+	AppID                 string
+	Gateways              []string
+	DNS                   []string
 	ControllerURL         string
 	DeviceID              string
 	Platform              string
@@ -188,7 +191,7 @@ func New(opts Options) (*Client, error) {
 	if opts.ClientMode {
 		mode = "client"
 	}
-	cfg := &config.Config{BaseURL: strings.TrimRight(opts.ControllerURL, "/"), DeviceID: opts.DeviceID, Platform: opts.Platform, LoginDomain: opts.LoginDomain, ClientType: mode}
+	cfg := &config.Config{BaseURL: strings.TrimRight(opts.ControllerURL, "/"), DeviceID: opts.DeviceID, Platform: opts.Platform, LoginDomain: opts.LoginDomain, ClientType: mode, AppID: opts.AppID, Gateways: append([]string(nil), opts.Gateways...), DNS: append([]string(nil), opts.DNS...)}
 	p := session.NewProvider(cfg, opts.Logger, opts.PromptSMS)
 	p.Authenticate = opts.Authenticator.Authenticate
 	p.Transport = opts.Transport
@@ -202,11 +205,19 @@ func New(opts Options) (*Client, error) {
 	}
 	p.SetStore(&stateStore{store: opts.SessionStore})
 	m := tunnel.NewManager(p, opts.Logger)
-	m.MaxAttempts = 1
+	m.MaxAttempts = 3
 	m.DialContext = opts.DialContext
 	m.GatewayTLSConfig = opts.GatewayTLSConfig
+	if name := cfg.GatewayServerName(); name != "" {
+		if m.GatewayTLSConfig == nil {
+			m.GatewayTLSConfig = &tls.Config{ServerName: name}
+		} else if m.GatewayTLSConfig.ServerName == "" {
+			m.GatewayTLSConfig = m.GatewayTLSConfig.Clone()
+			m.GatewayTLSConfig.ServerName = name
+		}
+	}
 	m.GatewayTrustStore = opts.GatewayTrustStore
-	d := &l3.Dialer{Manager: m, Provider: p, Logger: opts.Logger, MaxAttempts: 1}
+	d := &l3.Dialer{Manager: m, Provider: p, Logger: opts.Logger}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{transport: ownedTransport, provider: p, manager: m, dialer: d, resolver: resolver.NewWithDialerOptions(p, d, opts.DialContext, opts.DisableSystemResolver), ctx: ctx, cancel: cancel, conns: make(map[*ownedConn]struct{}), events: make(chan Event, 16)}
 	p.AddObserver(clientObserver{c})
@@ -222,24 +233,30 @@ func (c *Client) Authenticate(parent context.Context) (Info, error) {
 	if c.isClosed() {
 		return Info{}, ErrClosed
 	}
-	ctx, done := c.operation(parent)
+	ctx, done := c.withLifetime(parent)
 	defer done()
 	if _, err := c.provider.ForceLogin(ctx); err != nil {
 		return Info{}, err
 	}
 	return c.Connect(ctx)
 }
-func (c *Client) operation(parent context.Context) (context.Context, func()) {
-	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+func (c *Client) withLifetime(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
 	stop := context.AfterFunc(c.ctx, cancel)
 	return ctx, func() { stop(); cancel() }
+}
+
+func (c *Client) operation(parent context.Context) (context.Context, func()) {
+	ctx, release := c.withLifetime(parent)
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	return ctx, func() { cancel(); release() }
 }
 
 func (c *Client) Connect(parent context.Context) (Info, error) {
 	if c.isClosed() {
 		return Info{}, ErrClosed
 	}
-	ctx, done := c.operation(parent)
+	ctx, done := c.withLifetime(parent)
 	defer done()
 	cred, err := c.provider.Credential(ctx)
 	if err != nil {

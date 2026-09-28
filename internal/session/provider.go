@@ -23,15 +23,19 @@ var errSMSAuthSessionExpired = errors.New("SMS authentication session expired")
 
 // Credential is everything the tunnel and resolver need from a live session.
 type Credential struct {
-	Original     *Credential
-	SID          string
-	DeviceID     string
-	Username     string
-	ConnectionID string
-	CsrfToken    string
-	Cookies      []*http.Cookie
-	Gateways     []string
-	DNS          []string
+	// AppID is the legacy fallback; matched resource rules always take priority.
+	AppID           string
+	LegacyRouting   bool
+	GatewayOverride bool
+	Original        *Credential
+	SID             string
+	DeviceID        string
+	Username        string
+	ConnectionID    string
+	CsrfToken       string
+	Cookies         []*http.Cookie
+	Gateways        []string
+	DNS             []string
 	// Policy is the full routing policy (domain/IP/CIDR × port → appId)
 	// from clientResource.
 	Policy *sdpc.Resource
@@ -93,6 +97,9 @@ type refreshCall struct {
 // NewProvider builds a credential provider. prompt may be nil; a login that
 // requires SMS then returns an error.
 func NewProvider(cfg *config.Config, logger *slog.Logger, prompt SMSPrompter) *Provider {
+	normalized := *cfg
+	normalized.ApplyControllerDefaults()
+	cfg = &normalized
 	return &Provider{
 		cfg:    cfg,
 		logger: logger,
@@ -620,6 +627,9 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 	if len(gateways) == 0 && len(gatewaysOverride) > 0 {
 		gateways = gatewaysOverride
 	}
+	if len(gateways) == 0 && p.cfg.IsShanghaiTech() {
+		gateways = []string{"119.78.254.241:441", "59.78.171.241:441"}
+	}
 	if len(gateways) == 0 {
 		return nil, fmt.Errorf("controller supplied no gateway addresses")
 	}
@@ -629,15 +639,18 @@ func (p *Provider) finishLogin(ctx context.Context, sc *sdpc.Client, gatewaysOve
 	}
 
 	cred := &Credential{
-		SID:          sc.SID(),
-		DeviceID:     p.cfg.DeviceID,
-		Username:     username,
-		ConnectionID: fmt.Sprintf("%X-%d", md5.Sum([]byte(p.cfg.DeviceID)), time.Now().UnixMicro()),
-		CsrfToken:    sc.CSRF(),
-		Cookies:      sc.Cookies(),
-		Gateways:     gateways,
-		DNS:          dns,
-		Policy:       res,
+		AppID:           p.cfg.AppID,
+		LegacyRouting:   p.cfg.IsShanghaiTech(),
+		GatewayOverride: len(p.cfg.Gateways) != 0,
+		SID:             sc.SID(),
+		DeviceID:        p.cfg.DeviceID,
+		Username:        username,
+		ConnectionID:    fmt.Sprintf("%X-%d", md5.Sum([]byte(p.cfg.DeviceID)), time.Now().UnixMicro()),
+		CsrfToken:       sc.CSRF(),
+		Cookies:         sc.Cookies(),
+		Gateways:        gateways,
+		DNS:             dns,
+		Policy:          res,
 	}
 
 	records := make([]CookieRecord, 0, len(cred.Cookies))

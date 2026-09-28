@@ -51,7 +51,14 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int, appID, domain st
 		return nil, fmt.Errorf("target has no authorizing application")
 	}
 	if !cred.Policy.AppTCPPreferL3[appID] {
-		return d.Manager.DialTCP(ctx, ip, port, appID, domain)
+		conn, err := d.Manager.DialTCP(ctx, ip, port, appID, domain)
+		if err == nil {
+			return conn, nil
+		}
+		if !tunnel.ShouldFallbackToL3(err) {
+			return nil, err
+		}
+		d.Logger.Debug("direct TCP unavailable; falling back to L3", "ip", ip, "port", port, "err", err)
 	}
 	return d.dialWithRetry(ctx, "tcp", ip, port, func() (net.Conn, error) {
 		return d.dialOnce(ctx, ip, port, appID, domain)
@@ -59,8 +66,7 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int, appID, domain st
 }
 
 // DialUDP opens an authenticated connected UDP flow. It is intentionally
-// exposed only to internal services such as split-horizon DNS; SOCKS5 UDP
-// ASSOCIATE remains unsupported.
+// used by the proxy relays and split-horizon DNS resolver.
 func (d *Dialer) DialUDP(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
 	if err := validateTarget(ip, port); err != nil {
 		return nil, err
@@ -192,12 +198,23 @@ func (d *Dialer) authorizeFlow(ctx context.Context, ip string, port int, appID, 
 		return nil, err
 	}
 	if appID == "" {
-		appID = cred.Policy.AppIDForProtocol(net.ParseIP(ip).To4(), port, "", map[int]string{6: "tcp", 17: "udp", 1: "icmp"}[protocol])
+		network, err := protocolName(protocol)
+		if err != nil {
+			return nil, err
+		}
+		if cred.Policy == nil {
+			return nil, errors.New("missing resource policy")
+		}
+		appID = cred.Policy.AppIDForProtocol(net.ParseIP(ip).To4(), port, cred.AppID, network)
 		if appID == "" {
 			return nil, fmt.Errorf("target has no authorizing application")
 		}
 	}
-	tun, err := d.Manager.TunnelForApp(ctx, appID)
+	manager, err := d.Manager.ForApp(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	tun, err := manager.Tunnel(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +249,7 @@ func (d *Dialer) authorizeFlow(ctx context.Context, ip string, port int, appID, 
 		if rej.SwitchLine {
 			d.Logger.Warn("per-conn auth requests line switch",
 				"code", resp.Code, "message", resp.Message)
-			d.Manager.SwitchLine()
+			manager.SwitchLine()
 		}
 		return nil, rej
 	}

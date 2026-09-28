@@ -2,12 +2,13 @@ package session
 
 import (
 	"context"
-	"geektrust/internal/config"
 	"io"
 	"log/slog"
 	"os"
 	"testing"
 	"time"
+
+	"geektrust/internal/config"
 )
 
 type ephemeralStore struct{}

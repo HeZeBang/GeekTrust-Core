@@ -118,7 +118,7 @@ func (r *Resolver) resolve(ctx context.Context, host string, port int, protocol 
 		}
 		return Resolution{
 			IP:    v4.String(),
-			AppID: cred.Policy.AppIDForProtocol(v4, port, "", protocol),
+			AppID: cred.Policy.AppIDForProtocol(v4, port, cred.AppID, protocol),
 		}, nil
 	}
 	if rule, ok := cred.Policy.MatchDomainProtocol(host, port, protocol); ok {
@@ -154,7 +154,7 @@ func routeDNSResult(cred *session.Credential, host string, port int, v4 net.IP, 
 	if rule, ok := cred.Policy.MatchSuffixProtocol(host, port, protocol); ok {
 		return Resolution{IP: v4.String(), AppID: rule.AppID, Domain: host}
 	}
-	return Resolution{IP: v4.String()}
+	return Resolution{IP: v4.String(), AppID: cred.AppID}
 }
 
 // lookupIPv4 first tries direct public/system resolution. If those stages
@@ -210,7 +210,7 @@ func (r *Resolver) tunnelResolver(cred *session.Credential, server string) *net.
 			if network == "tcp" || network == "tcp4" {
 				protocol = "tcp"
 			}
-			appID := ""
+			appID := cred.AppID
 			if cred.Policy != nil {
 				appID = cred.Policy.AppIDForProtocol(ip, 53, appID, protocol)
 			}

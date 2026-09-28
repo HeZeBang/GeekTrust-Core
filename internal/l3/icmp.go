@@ -12,13 +12,18 @@ import (
 	"geektrust/internal/tunnel"
 )
 
+const (
+	icmpEchoReply   = 0
+	icmpEchoRequest = 8
+)
+
 var ErrPacketUnsupported = errors.New("only unfragmented IPv4 ICMP Echo requests are supported")
 
 // ExchangePacket forwards one Echo request and returns the actual gateway reply.
 // The caller owns the local interface; only the protocol's virtual source address
 // and multiplexing identifier are substituted while the packet is in flight.
 func (d *Dialer) ExchangePacket(ctx context.Context, packet []byte) ([]byte, error) {
-	ihl, err := validateEcho(packet, 8)
+	ihl, err := validateEcho(packet, icmpEchoRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +41,11 @@ func (d *Dialer) ExchangePacket(ctx context.Context, packet []byte) ([]byte, err
 	if app == "" {
 		return nil, errors.New("ICMP target is not authorized")
 	}
-	tun, err := d.Manager.TunnelForApp(ctx, app)
+	manager, err := d.Manager.ForApp(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	tun, err := manager.Tunnel(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +56,8 @@ func (d *Dialer) ExchangePacket(ctx context.Context, packet []byte) ([]byte, err
 	}
 	defer tun.UnregisterConn(id)
 	authID := tun.NextAuthID()
-	body, err := buildAuthRequestIP(cred.SID, app, cred.DeviceID, destination.String(), 0, tun.VIP(), 0, authID, "", 1)
+	// ICMP has no transport ports; only the Echo identifier is rewritten below.
+	body, err := buildAuthRequestIP(cred.SID, app, cred.DeviceID, destination.String(), 0, tun.VIP(), 0, authID, "", protocolICMP)
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +66,9 @@ func (d *Dialer) ExchangePacket(ctx context.Context, packet []byte) ([]byte, err
 		return nil, fmt.Errorf("ICMP authorization: %w", err)
 	}
 	if auth.Code != 0 {
+		if auth.ShouldSwitchLine() {
+			manager.SwitchLine()
+		}
 		return nil, &AuthRejectedError{Code: auth.Code, SwitchLine: auth.ShouldSwitchLine()}
 	}
 	if auth.ConnectToken == "" {
@@ -78,7 +91,7 @@ func (d *Dialer) ExchangePacket(ctx context.Context, packet []byte) ([]byte, err
 		case <-tun.Dead():
 			return nil, tunnel.ErrTunnelDead
 		case reply := <-sink.packets:
-			rh, err := validateEcho(reply, 0)
+			rh, err := validateEcho(reply, icmpEchoReply)
 			if err != nil || !bytes.Equal(reply[12:16], packet[16:20]) ||
 				!bytes.Equal(reply[16:20], tun.VIP().To4()) ||
 				binary.BigEndian.Uint16(reply[rh+4:rh+6]) != id ||
@@ -104,7 +117,7 @@ func (s *echoSink) DeliverPacket(packet []byte) {
 }
 
 func validateEcho(packet []byte, kind byte) (int, error) {
-	if len(packet) < 28 || packet[0]>>4 != 4 || packet[9] != 1 {
+	if len(packet) < 28 || packet[0]>>4 != 4 || packet[9] != protocolICMP {
 		return 0, ErrPacketUnsupported
 	}
 	ihl := int(packet[0]&15) * 4
@@ -133,7 +146,7 @@ func internetChecksum(b []byte) uint16 {
 		sum += uint32(b[0]) << 8
 	}
 	for sum>>16 != 0 {
-		sum = sum&65535 + sum>>16
+		sum = (sum & 0xffff) + (sum >> 16)
 	}
 	return ^uint16(sum)
 }

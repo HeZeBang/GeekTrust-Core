@@ -176,8 +176,7 @@ func (m *Manager) Close() {
 	}
 }
 
-// connect retries dial+tunnel-auth with exponential backoff until it succeeds
-// or ctx is done. Line-switch codes rotate the pool; other tunnel-auth
+// connect retries dial+tunnel-auth with bounded exponential backoff. Line-switch codes rotate the pool; other tunnel-auth
 // failures eventually invalidate the session for a silent re-login.
 func (m *Manager) connect(ctx context.Context) (*Tunnel, error) {
 	backoff := reconnectBase
@@ -314,30 +313,39 @@ func (m *Manager) Lines() []string {
 	return m.lines.Addrs()
 }
 
-type appProvider struct {
+type groupProvider struct {
 	session.CredentialProvider
-	appID string
+	group string
 }
 
-func (p appProvider) Credential(ctx context.Context) (*session.Credential, error) {
+func (p groupProvider) Credential(ctx context.Context) (*session.Credential, error) {
 	c, err := p.CredentialProvider.Credential(ctx)
 	if err != nil {
 		return nil, err
 	}
-	copy := *c
-	copy.Original = c
-	copy.Gateways = c.Policy.GatewaysForApp(p.appID)
-	return &copy, nil
+	scoped := *c
+	scoped.Original = c
+	scoped.Gateways = c.GatewaysForGroup(p.group)
+	return &scoped, nil
 }
-func (p appProvider) InvalidateIfCurrent(c *session.Credential) bool {
+func (p groupProvider) InvalidateIfCurrent(c *session.Credential) bool {
 	if c.Original == nil {
 		return false
 	}
 	return p.CredentialProvider.InvalidateIfCurrent(c.Original)
 }
 
-// TunnelForApp keeps L3 traffic within the target application's gateway group.
-func (m *Manager) TunnelForApp(ctx context.Context, appID string) (*Tunnel, error) {
+// ForApp returns the manager that owns the application's gateway group.
+func (m *Manager) ForApp(ctx context.Context, appID string) (*Manager, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return nil, ErrTunnelDead
+	}
 	c, err := m.provider.Credential(ctx)
 	if err != nil {
 		return nil, err
@@ -345,16 +353,13 @@ func (m *Manager) TunnelForApp(ctx context.Context, appID string) (*Tunnel, erro
 	if c.Policy == nil {
 		return nil, errors.New("missing resource policy")
 	}
-	group := c.Policy.AppNodeGroups[appID]
+	group := c.GatewayGroupForApp(appID)
 	if group == "" {
-		group = c.Policy.MajorNodeGroup
-	}
-	if group == "" {
-		return m.Tunnel(ctx)
+		return m, nil
 	}
 	m.groupsMu.Lock()
 	m.mu.Lock()
-	closed := m.closed
+	closed = m.closed
 	m.mu.Unlock()
 	if closed {
 		m.groupsMu.Unlock()
@@ -365,7 +370,7 @@ func (m *Manager) TunnelForApp(ctx context.Context, appID string) (*Tunnel, erro
 	}
 	g := m.groups[group]
 	if g == nil {
-		g = NewManager(appProvider{m.provider, appID}, m.logger)
+		g = NewManager(groupProvider{m.provider, group}, m.logger)
 		g.MaxAttempts = m.MaxAttempts
 		g.DialContext = m.DialContext
 		g.GatewayTLSConfig = m.GatewayTLSConfig
@@ -373,5 +378,5 @@ func (m *Manager) TunnelForApp(ctx context.Context, appID string) (*Tunnel, erro
 		m.groups[group] = g
 	}
 	m.groupsMu.Unlock()
-	return g.Tunnel(ctx)
+	return g, nil
 }

@@ -261,6 +261,7 @@ func runVPN(ctx context.Context, cfg *config.Config, logger *slog.Logger, provid
 	go provider.CheckLoop(ctx, 5*time.Minute)
 
 	manager := tunnel.NewManager(provider, logger)
+	manager.GatewayTLSConfig = &tls.Config{ServerName: cfg.GatewayServerName()}
 	defer manager.Close()
 	dialer := &l3.Dialer{Manager: manager, Provider: provider, Logger: logger}
 	res := resolver.New(provider, dialer)

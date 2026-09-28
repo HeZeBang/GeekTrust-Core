@@ -3,8 +3,6 @@ package client
 import (
 	"context"
 	"encoding/binary"
-	"geektrust/internal/idsauth"
-	"golang.org/x/net/dns/dnsmessage"
 	"io"
 	"log/slog"
 	"net"
@@ -13,6 +11,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
+
+	"geektrust/internal/idsauth"
 )
 
 type testGatewayPins struct {

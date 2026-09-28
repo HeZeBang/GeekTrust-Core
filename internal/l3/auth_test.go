@@ -143,3 +143,20 @@ func TestBuildAuthRequestIPUDP(t *testing.T) {
 		t.Fatalf("UDP auth request = %+v", parsed)
 	}
 }
+
+func TestBuildAuthRequestICMP(t *testing.T) {
+	body, err := buildAuthRequestIP("sid", "app", "device", "192.0.2.1", 0, net.IPv4(10, 0, 0, 1), 0, 1, "", protocolICMP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request authRequestIP
+	if err := json.Unmarshal(body, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.URL != "icmp:192.0.2.1:0" || request.IP.Protocol != protocolICMP || request.IP.DestPort != 0 || request.IP.SrcPort != 0 {
+		t.Fatalf("incorrect ICMP auth shape: %+v", request.IP)
+	}
+	if _, err := protocolName(255); err == nil {
+		t.Fatal("unknown protocol accepted")
+	}
+}
