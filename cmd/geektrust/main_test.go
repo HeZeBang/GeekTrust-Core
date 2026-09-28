@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -251,8 +252,16 @@ func TestValidateInitPaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := os.Symlink(realDir, linkDir); err != nil {
-			t.Fatal(err)
+			if runtime.GOOS != "windows" {
+				t.Fatal(err)
+			}
+			// Junctions exercise the same directory-alias collision without
+			// requiring Windows Developer Mode or an elevated token.
+			if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", linkDir, realDir).CombinedOutput(); err != nil {
+				t.Fatalf("create directory alias: %v: %s", err, output)
+			}
 		}
+		defer os.Remove(linkDir)
 		_, err := validateInitPaths(
 			filepath.Join(linkDir, "future"),
 			&config.Config{
@@ -267,7 +276,7 @@ func TestValidateInitPaths(t *testing.T) {
 
 	t.Run("symlink through other-writable parent", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
-			t.Skip("POSIX permission model; Windows ACLs have separate tests")
+			t.Skip("Windows file modes do not represent Unix directory permissions")
 		}
 		targetDir := filepath.Join(dir, "safe-symlink-target")
 		unsafeDir := filepath.Join(dir, "unsafe-symlink-parent")
@@ -298,7 +307,7 @@ func TestValidateInitPaths(t *testing.T) {
 
 	t.Run("other-writable config directory", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
-			t.Skip("POSIX permission model; Windows ACLs have separate tests")
+			t.Skip("Windows file modes do not represent Unix directory permissions")
 		}
 		shared := filepath.Join(dir, "shared")
 		if err := os.Mkdir(shared, 0o700); err != nil {
@@ -321,7 +330,7 @@ func TestValidateInitPaths(t *testing.T) {
 
 	t.Run("other-writable keystore directory", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
-			t.Skip("POSIX permission model; Windows ACLs have separate tests")
+			t.Skip("Windows file modes do not represent Unix directory permissions")
 		}
 		shared := filepath.Join(dir, "shared-keystore")
 		if err := os.Mkdir(shared, 0o700); err != nil {
@@ -344,7 +353,7 @@ func TestValidateInitPaths(t *testing.T) {
 
 	t.Run("private child under other-writable ancestor", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
-			t.Skip("POSIX permission model; Windows ACLs have separate tests")
+			t.Skip("Windows file modes do not represent Unix directory permissions")
 		}
 		shared := filepath.Join(dir, "shared-ancestor")
 		privateChild := filepath.Join(shared, "private-child")
@@ -371,7 +380,7 @@ func TestValidateInitPaths(t *testing.T) {
 
 	t.Run("sticky writable ancestor", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
-			t.Skip("POSIX permission model; Windows ACLs have separate tests")
+			t.Skip("Windows file modes do not represent Unix directory permissions")
 		}
 		sticky := filepath.Join(dir, "sticky-ancestor")
 		privateChild := filepath.Join(sticky, "private-child")

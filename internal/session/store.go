@@ -11,11 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"geektrust/internal/privatefile"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
+
+	"geektrust/internal/privatefile"
 )
 
 // State is the persisted session (encrypted, 0600).

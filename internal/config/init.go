@@ -5,12 +5,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"geektrust/internal/privatefile"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"geektrust/internal/privatefile"
 )
 
 // InitOptions controls the initial config written by Initialize.

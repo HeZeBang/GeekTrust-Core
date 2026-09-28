@@ -5,15 +5,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"geektrust/internal/privatefile"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"geektrust/internal/config"
-
 	"golang.org/x/text/unicode/norm"
+
+	"geektrust/internal/config"
+	"geektrust/internal/privatefile"
 )
 
 const passkeyToolSource = "git+https://github.com/vvbbnn00/shanghaitech-ids-passkey.git"
@@ -66,6 +66,14 @@ func validateInitPaths(configPath string, cfg *config.Config) (string, error) {
 		}
 	}
 	for i, item := range paths {
+		if infos[i] != nil {
+			if err := validateInitFilePermissions(item.name, lexical[i]); err != nil {
+				return "", err
+			}
+			if err := validateInitFilePermissions(item.name, resolved[i]); err != nil {
+				return "", err
+			}
+		}
 		if err := validateInitDirectory(item.name, lexical[i]); err != nil {
 			return "", err
 		}
@@ -103,28 +111,17 @@ func containsParentTraversal(path string) bool {
 }
 
 func validateInitDirectory(name, path string) error {
-	dir := filepath.Dir(path)
-	for {
-		info, err := os.Stat(dir)
-		if err == nil {
-			if !info.IsDir() {
-				return fmt.Errorf("%s parent %s is not a directory", name, dir)
-			}
-			// A directory entry can be replaced by anyone who can write its
-			// parent. Check every existing ancestor before creating or
-			// replacing any config or credential file.
-			if err := privatefile.CheckDirectory(dir); err != nil {
-				return fmt.Errorf("%s directory ancestor %s: %w", name, dir, err)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect %s directory: %w", name, err)
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return nil
-		}
-		dir = parent
+	if err := privatefile.CheckParents(path); err != nil {
+		return fmt.Errorf("%s %w", name, err)
 	}
+	return nil
+}
+
+func validateInitFilePermissions(name, path string) error {
+	if err := privatefile.CheckFile(path); err != nil {
+		return fmt.Errorf("%s file %s: %w", name, path, err)
+	}
+	return nil
 }
 
 // resolveInitPath resolves symlinks in the longest existing prefix, so paths
@@ -135,7 +132,7 @@ func resolveInitPath(path string) (string, os.FileInfo, error) {
 		return "", nil, err
 	}
 	if info, err := os.Stat(absolute); err == nil {
-		resolved, err := filepath.EvalSymlinks(absolute)
+		resolved, err := privatefile.ResolveExistingPath(absolute)
 		return resolved, info, err
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", nil, err
@@ -145,7 +142,7 @@ func resolveInitPath(path string) (string, os.FileInfo, error) {
 	var suffix []string
 	for {
 		if _, err := os.Stat(current); err == nil {
-			resolved, err := filepath.EvalSymlinks(current)
+			resolved, err := privatefile.ResolveExistingPath(current)
 			if err != nil {
 				return "", nil, err
 			}
