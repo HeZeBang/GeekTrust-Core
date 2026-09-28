@@ -1,4 +1,4 @@
-name: CI
+name: Build and Test
 on:
   push:
   pull_request:
@@ -18,7 +18,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test ./...
-      - run: go test -race ./client ./internal/idsauth ./internal/session ./internal/tunnel ./internal/l3
-      - run: go vet ./...
-      - run: go build ./...
+      - name: Unit and integration tests
+        run: go test ./...
+      - name: Race detector
+        run: go test -race ./client ./internal/idsauth ./internal/session ./internal/tunnel ./internal/l3
+      - name: Static analysis
+        run: go vet ./...
+      - name: Build packages
+        run: go build ./...
