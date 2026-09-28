@@ -1,6 +1,5 @@
-// Package idsauth implements passwordless ShanghaiTech IDS login using a
-// WebAuthn passkey, mirroring the third_party/shanghaitech-ids-passkey Python
-// library (login only; passkey binding still happens through that library).
+// Package idsauth implements ShanghaiTech and ECNU passkey login. The schools
+// share credential handling and WebAuthn signing, with separate login flows.
 package idsauth
 
 import (
@@ -8,15 +7,21 @@ import (
 	"compress/zlib"
 	"encoding/json"
 	"fmt"
-	"geektrust/internal/privatefile"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+
+	"geektrust/internal/privatefile"
 )
 
 // keystoreMagic prefixes every default-format keystore file
 // ("SHTUIDSPASSKEY" + 0x01), followed by zlib-compressed JSON.
+const (
+	kindShanghaiTech = "shanghaitech"
+	kindECNU         = "ecnu"
+)
+
 var keystoreMagic = []byte("SHTUIDSPASSKEY\x01")
 var ecnuMagic = []byte("ECNUSSOPASSKEY\x01")
 
@@ -115,9 +120,9 @@ func (k *Keystore) Path() string { return k.path }
 
 func (k *Keystore) Kind() string {
 	if bytes.Equal(k.magic, ecnuMagic) {
-		return "ecnu"
+		return kindECNU
 	}
-	return "shanghaitech"
+	return kindShanghaiTech
 }
 
 func (k *Keystore) str(field string) string { s, _ := k.raw[field].(string); return s }

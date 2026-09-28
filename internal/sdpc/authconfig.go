@@ -44,15 +44,17 @@ func (c *Client) AuthConfig(ctx context.Context) (*AuthConfig, error) {
 	}
 	c.csrf = data.Security.CsrfToken
 	if c.LoginDomain == "" {
+		var selected string
 		for _, method := range data.AuthServerInfoList {
 			if method.AuthType != "auth/cas" || method.LoginDomain == "" {
 				continue
 			}
-			if c.LoginDomain != "" && c.LoginDomain != method.LoginDomain {
+			if selected != "" && selected != method.LoginDomain {
 				return nil, fmt.Errorf("multiple CAS login domains; select login_domain explicitly")
 			}
-			c.LoginDomain = method.LoginDomain
+			selected = method.LoginDomain
 		}
+		c.LoginDomain = selected
 	}
 	exp := data.AntiMITMAttackData.DevicePubKeyExp
 	if exp == "" {

@@ -21,6 +21,8 @@ import (
 	"golang.org/x/net/html"
 )
 
+type ecnuClient struct{ *Client }
+
 // ECNU uses an RSA-wrapped AES-ECB envelope for the challenge endpoint.
 // This is the server's transport format, not credential storage encryption.
 type ecnuEnvelope struct {
@@ -138,7 +140,7 @@ func pageValue(body []byte, id string) string {
 	}
 	return find(root)
 }
-func (c *Client) ecnuHTTP(ctx context.Context, method, target, content string, body []byte, envelope *ecnuEnvelope, follow bool) ([]byte, error) {
+func (c *ecnuClient) request(ctx context.Context, method, target, content string, body []byte, envelope *ecnuEnvelope, follow bool) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
 		return nil, errors.New("invalid SSO request")
@@ -189,11 +191,11 @@ func (c *Client) ecnuHTTP(ctx context.Context, method, target, content string, b
 	}
 	return b, nil
 }
-func (c *Client) loginECNU(ctx context.Context) error {
+func (c *ecnuClient) Login(ctx context.Context) error {
 	if c.BaseURL != c.Keystore.BaseURL() || c.Origin != c.BaseURL {
 		return errors.New("credential origin mismatch")
 	}
-	page, err := c.ecnuHTTP(ctx, "GET", c.BaseURL+"/login", "", nil, nil, true)
+	page, err := c.request(ctx, http.MethodGet, c.BaseURL+"/login", "", nil, nil, true)
 	if err != nil {
 		return err
 	}
@@ -207,7 +209,7 @@ func (c *Client) loginECNU(ctx context.Context) error {
 	if execution == "" {
 		return errors.New("SSO execution token missing")
 	}
-	script, err := c.ecnuHTTP(ctx, "GET", c.BaseURL+"/public/webauthJs/webauthn.js?v=2.0.1", "", nil, nil, true)
+	script, err := c.request(ctx, http.MethodGet, c.BaseURL+"/public/webauthJs/webauthn.js?v=2.0.1", "", nil, nil, true)
 	if err != nil {
 		return err
 	}
@@ -219,7 +221,7 @@ func (c *Client) loginECNU(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	raw, err := c.ecnuHTTP(ctx, "POST", c.BaseURL+"/webauthn/authenticate", "application/json", body, env, false)
+	raw, err := c.request(ctx, http.MethodPost, c.BaseURL+"/webauthn/authenticate", "application/json", body, env, false)
 	if err != nil {
 		return err
 	}
@@ -269,7 +271,7 @@ func (c *Client) loginECNU(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	raw, err = c.ecnuHTTP(ctx, "POST", target.String(), "text/plain;charset=UTF-8", body, nil, false)
+	raw, err = c.request(ctx, http.MethodPost, target.String(), "text/plain;charset=UTF-8", body, nil, false)
 	if err != nil {
 		return err
 	}
@@ -282,16 +284,24 @@ func (c *Client) loginECNU(ctx context.Context) error {
 		return errors.New("SSO assertion rejected")
 	}
 	form := url.Values{"username": {c.Keystore.Username()}, "token": {result.Token}, "_eventId": {"validateWebAuthn"}, "execution": {execution}, "geolocation": {""}}
-	_, err = c.ecnuHTTP(ctx, "POST", c.BaseURL+"/login", "application/x-www-form-urlencoded", []byte(form.Encode()), nil, true)
+	_, err = c.request(ctx, http.MethodPost, c.BaseURL+"/login", "application/x-www-form-urlencoded", []byte(form.Encode()), nil, true)
 	if err != nil {
 		return err
 	}
-	page, err = c.ecnuHTTP(ctx, "GET", c.BaseURL+"/account", "", nil, nil, false)
+	loggedIn, err := c.IsLoggedIn(ctx)
 	if err != nil {
 		return err
 	}
-	if pageValue(page, "ps-username") != c.Keystore.Username() {
+	if !loggedIn {
 		return errors.New("SSO account session not established")
 	}
 	return nil
+}
+
+func (c *ecnuClient) IsLoggedIn(ctx context.Context) (bool, error) {
+	page, err := c.request(ctx, http.MethodGet, c.BaseURL+"/account", "", nil, nil, false)
+	if err != nil {
+		return false, err
+	}
+	return pageValue(page, "ps-username") == c.Keystore.Username(), nil
 }
