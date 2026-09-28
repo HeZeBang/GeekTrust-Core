@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/nanakusa-electronics/geektrust/internal/sdpc"
-	"github.com/nanakusa-electronics/geektrust/internal/session"
+	"geektrust/internal/sdpc"
+	"geektrust/internal/session"
 )
 
 func TestBuildTCPRequestCombinesAuthAndDestination(t *testing.T) {

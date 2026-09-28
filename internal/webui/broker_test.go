@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/sdpc"
+	"geektrust/internal/sdpc"
 )
 
 type promptResult struct {

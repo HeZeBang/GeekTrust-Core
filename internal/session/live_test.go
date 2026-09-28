@@ -2,7 +2,7 @@ package session
 
 import (
 	"context"
-	"github.com/nanakusa-electronics/geektrust/internal/config"
+	"geektrust/internal/config"
 	"io"
 	"log/slog"
 	"os"

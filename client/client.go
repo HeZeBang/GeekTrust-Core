@@ -17,12 +17,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/config"
-	"github.com/nanakusa-electronics/geektrust/internal/idsauth"
-	"github.com/nanakusa-electronics/geektrust/internal/l3"
-	"github.com/nanakusa-electronics/geektrust/internal/resolver"
-	"github.com/nanakusa-electronics/geektrust/internal/session"
-	"github.com/nanakusa-electronics/geektrust/internal/tunnel"
+	"geektrust/internal/config"
+	"geektrust/internal/idsauth"
+	"geektrust/internal/l3"
+	"geektrust/internal/resolver"
+	"geektrust/internal/session"
+	"geektrust/internal/tunnel"
 )
 
 // BlobStore is scoped to a single identity/deployment by the embedding application.

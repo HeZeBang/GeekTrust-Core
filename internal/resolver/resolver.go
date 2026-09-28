@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/nanakusa-electronics/geektrust/internal/session"
+	"geektrust/internal/session"
 )
 
 type TunnelDialer interface {

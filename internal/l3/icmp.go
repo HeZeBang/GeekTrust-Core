@@ -9,7 +9,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/tunnel"
+	"geektrust/internal/tunnel"
 )
 
 var ErrPacketUnsupported = errors.New("only unfragmented IPv4 ICMP Echo requests are supported")

@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/config"
-	"github.com/nanakusa-electronics/geektrust/internal/idsauth"
-	"github.com/nanakusa-electronics/geektrust/internal/sdpc"
+	"geektrust/internal/config"
+	"geektrust/internal/idsauth"
+	"geektrust/internal/sdpc"
 )
 
 // errSMSAuthSessionExpired marks an expiration discovered after the user has

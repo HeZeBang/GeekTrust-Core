@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/config"
-	"github.com/nanakusa-electronics/geektrust/internal/sdpc"
-	"github.com/nanakusa-electronics/geektrust/internal/session"
+	"geektrust/internal/config"
+	"geektrust/internal/sdpc"
+	"geektrust/internal/session"
 )
 
 //go:embed all:dist

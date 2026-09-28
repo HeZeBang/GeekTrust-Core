@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/session"
+	"geektrust/internal/session"
 )
 
 type managerTestProvider struct{}

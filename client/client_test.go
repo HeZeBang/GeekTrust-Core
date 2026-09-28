@@ -3,7 +3,7 @@ package client
 import (
 	"context"
 	"encoding/binary"
-	"github.com/nanakusa-electronics/geektrust/internal/idsauth"
+	"geektrust/internal/idsauth"
 	"golang.org/x/net/dns/dnsmessage"
 	"io"
 	"log/slog"

@@ -20,13 +20,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/config"
-	"github.com/nanakusa-electronics/geektrust/internal/inbound"
-	"github.com/nanakusa-electronics/geektrust/internal/l3"
-	"github.com/nanakusa-electronics/geektrust/internal/resolver"
-	"github.com/nanakusa-electronics/geektrust/internal/session"
-	"github.com/nanakusa-electronics/geektrust/internal/tunnel"
-	"github.com/nanakusa-electronics/geektrust/internal/webui"
+	"geektrust/internal/config"
+	"geektrust/internal/inbound"
+	"geektrust/internal/l3"
+	"geektrust/internal/resolver"
+	"geektrust/internal/session"
+	"geektrust/internal/tunnel"
+	"geektrust/internal/webui"
 )
 
 // version is replaced by scripts/package-release.sh through the Go linker.

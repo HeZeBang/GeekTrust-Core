@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/config"
-	"github.com/nanakusa-electronics/geektrust/internal/resolver"
+	"geektrust/internal/config"
+	"geektrust/internal/resolver"
 )
 
 const (

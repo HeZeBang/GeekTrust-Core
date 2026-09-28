@@ -8,7 +8,7 @@ import (
 	"compress/zlib"
 	"encoding/json"
 	"fmt"
-	"github.com/nanakusa-electronics/geektrust/internal/privatefile"
+	"geektrust/internal/privatefile"
 	"io"
 	"net/url"
 	"os"

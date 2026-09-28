@@ -5,13 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/nanakusa-electronics/geektrust/internal/privatefile"
+	"geektrust/internal/privatefile"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/nanakusa-electronics/geektrust/internal/config"
+	"geektrust/internal/config"
 
 	"golang.org/x/text/unicode/norm"
 )

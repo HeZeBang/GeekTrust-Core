@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/frame"
+	"geektrust/internal/frame"
 )
 
 const (

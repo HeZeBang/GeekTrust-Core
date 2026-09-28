@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/nanakusa-electronics/geektrust/internal/privatefile"
+	"geektrust/internal/privatefile"
 	"io"
 	"os"
 	"path/filepath"

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nanakusa-electronics/geektrust/internal/config"
+	"geektrust/internal/config"
 )
 
 func TestBuildVersion(t *testing.T) {

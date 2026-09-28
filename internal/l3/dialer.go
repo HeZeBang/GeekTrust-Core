@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/session"
-	"github.com/nanakusa-electronics/geektrust/internal/tunnel"
+	"geektrust/internal/session"
+	"geektrust/internal/tunnel"
 )
 
 const (

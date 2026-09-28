@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/config"
-	"github.com/nanakusa-electronics/geektrust/internal/sdpc"
+	"geektrust/internal/config"
+	"geektrust/internal/sdpc"
 )
 
 type smsHandlerFunc func(context.Context, func(context.Context) error) (string, error)

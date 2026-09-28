@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/nanakusa-electronics/geektrust/client"
-	"github.com/nanakusa-electronics/geektrust/internal/config"
-	"github.com/nanakusa-electronics/geektrust/internal/idsauth"
-	"github.com/nanakusa-electronics/geektrust/internal/session"
+	"geektrust/client"
+	"geektrust/internal/config"
+	"geektrust/internal/idsauth"
+	"geektrust/internal/session"
 )
 
 // Command wiring owns paths and terminal interaction; the library sees neither.

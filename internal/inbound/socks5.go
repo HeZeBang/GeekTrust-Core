@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/resolver"
+	"geektrust/internal/resolver"
 )
 
 // SOCKS5 constants (RFC 1928).

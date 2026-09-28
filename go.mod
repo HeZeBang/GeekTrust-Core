@@ -1,4 +1,4 @@
-module github.com/nanakusa-electronics/geektrust
+module geektrust
 
 go 1.24.13
 

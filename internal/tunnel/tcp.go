@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nanakusa-electronics/geektrust/internal/session"
+	"geektrust/internal/session"
 )
 
 const (
