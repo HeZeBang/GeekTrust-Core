@@ -1,22 +1,6 @@
 # geekTrust
 
-`client` 是可直接链接的 Go SDK。它提供 ECNU 与上海科大 Passkey 登录、
-aTrust 会话、资源授权、目标解析、TCP/UDP 拨号及可选 IPv4 报文传输，
-不创建系统 TUN，也不修改路由或 DNS。原有命令行工具继续独立使用。
-
-嵌入时由调用方注入 `client.Options` 中的认证器、凭据存储、底层拨号器
-和日志，并独立管理系统网络。`Connect` 加载服务端策略；
-`OpenTransport` 可在配置系统网络前确认网关认证；`DialContext` 和
-`ExchangePacket` 只访问策略授权的资源。所有调用应使用有截止时间的
-context；关闭客户端会释放其连接。凭据存储必须在签名计数器更新时
-持久写入，同一凭据只交给一个认证器使用。
-
-默认 TLS 使用系统信任。私有 CA 网关可注入 `GatewayTrustStore`：
-首次连接保存该网关地址对应的公钥摘要，后续公钥变化会拒绝连接。
-此模式以已认证控制器下发的网关地址为信任起点。IPv6 目标连接
-目前不提供；ICMP Echo 只有在服务端资源授权和网关传输都支持时才能使用。
-
-geekTrust 是上海科技大学 aTrust VPN 的独立纯用户态客户端。它不创建虚拟网卡、不修改系统路由，也不需要 root。VPN 内的 TCP 和 UDP 流量通过本地 SOCKS5、HTTP CONNECT 代理提供给其他程序。
+geekTrust 是 aTrust VPN 的独立纯用户态客户端。它不创建虚拟网卡、不修改系统路由，也不需要 root。VPN 内的 TCP 和 UDP 流量通过本地 SOCKS5、HTTP CONNECT 代理提供给其他程序。
 
 协议细节见 [`docs/TECHNICAL.md`](docs/TECHNICAL.md)，工程设计见 [`docs/PLAN.md`](docs/PLAN.md)。
 
@@ -266,3 +250,8 @@ git push origin v0.1.0
 ## 许可与声明
 
 本项目仅供学习与合法使用。请遵守学校相关政策和法律法规。
+
+## 目前支持的平台
+
+- 上海科技大学
+- 华东师范大学

@@ -1,66 +1,30 @@
-# Embedded aTrust client
+# client
 
-The `client` package provides authentication, controller resource policy and
-TCP/UDP data transport. It does not open local proxy listeners, create a TUN,
-install routes or change DNS. The embedding application owns those resources.
-
-Create a client with an HTTPS controller origin, a persistent device ID and an
-`Authenticator`. `PasskeyAuthenticator` accepts ECNU and ShanghaiTech keystores
-through an application-owned `BlobStore`. The store must durably save updates
-and protect its contents. Reuse one authenticator per credential; do not use the
-same imported credential concurrently in another program. A failed counter save
-prevents assertion submission.
+`client` 封装认证、会话、资源解析和 TCP/UDP 连接，供项目内复用。
+它不启动代理监听器，也不创建 TUN 或修改系统路由、DNS。
 
 ```go
+import "geektrust/client"
+
 c, err := client.New(client.Options{
-    ControllerURL: "https://vpn.example.edu",
-    DeviceID: deviceID,
+    ControllerURL: controllerURL,
+    DeviceID:      deviceID,
     Authenticator: &client.PasskeyAuthenticator{Store: credentials},
-    SessionStore: sessions,
+    SessionStore:  sessions,
 })
 if err != nil { return err }
 defer c.Close()
-info, err := c.Connect(ctx)
-if err != nil { return err }
-_ = info // controller resources, DNS and protocol capabilities
-conn, err := c.DialContext(ctx, "tcp", "authorized.example.edu:443")
+
+if _, err := c.Connect(ctx); err != nil { return err }
+conn, err := c.DialContext(ctx, "tcp", address)
 if err != nil { return err }
 defer conn.Close()
 ```
 
-UDP connections retain datagram boundaries and reject payloads exceeding the
-1372-byte tunnel limit. Set connection deadlines for data
-I/O; dialing and authentication accept cancellation and have bounded setup
-timeouts. `Close` is repeatable and closes the client's active connections.
-Events contain typed lifecycle transitions without credentials or server bodies.
-
-The optional `PacketTransport` accepts unfragmented IPv4 ICMP Echo requests.
-It returns a genuine matching reply or an error. It does not synthesize successful
-ping responses. IPv6 target transport is not implemented; IPv6 gateway addressing
-is supported separately. Packet implementation alone does not imply that a given
-deployment authorizes ICMP.
-
-Applications are selected from controller policy, including protocol and port.
-TCP uses L3 only when the selected application requests it. An absent assigned
-gateway group is an error, not a reason to use another group. There is no public
-Internet redial after a tunnel failure.
-
-## Development status
-
-This interface is under development and is not a released library version.
-ECNU Passkey login, aTrust session establishment, and authorized UDP/TCP DNS
-round trips and an HTTPS 200 response from the school homepage have been exercised
-on Windows. An authorized ICMP exchange timed out; Echo is not verified on ECNU.
-L3 TCP, ShanghaiTech
-live login and macOS/Linux live connections still require deployment testing.
-The CLI login and dial commands use this interface. Proxy/web-panel wiring
-is being moved over; it currently retains
-internal wiring for the web panel and device-management commands.
-
-Protocol behavior was reviewed against the aTrust implementation used by
-[EZ4Connect](https://github.com/chenx-dust/EZ4Connect), in
-[zju-connect](https://github.com/Mythologyli/zju-connect/tree/4031c52214478d4082189b778ffc6e9744f1d256/client/atrust).
-No source files or Go module dependency were imported from that implementation.
-Upstream contribution should separate resource/transport corrections, credential
-injection and lifecycle changes, and the public package. Public library/product
-release remains pending upstream authorization.
+- `DeviceID` 是持久保存的 32 位大写十六进制标识，可用 `NewDeviceID` 生成。
+- `BlobStore` 收到的是凭据或会话的明文字节，调用方负责保密、原子写入和持久化。同一 passkey 使用同一认证器串行更新计数器；保存失败不会提交断言。
+- 认证遵循调用方的 context，允许等待短信输入；网络连接和解析设有超时。连接建立后，用 `SetDeadline` 控制读写。`Close` 会取消操作并关闭自有连接。
+- TCP 优先遵循服务端 L3 偏好，否则先尝试流式 TCP；协议不兼容或连接建立失败时可退回 L3，明确的目标拒绝和取消不会触发回退。
+- 上海科大保留旧配置的 `app_id` 兜底和网关/DNS 覆盖；其他控制器默认要求资源策略明确授权。
+- 默认 TLS 验证 CA。`GatewayTrustStore` 是显式启用的私有证书 TOFU 兜底，正常 CA 验证通过时不强制检查已有 pin；调用方负责持久保存 pin。
+- UDP 保留数据报边界，payload 上限为 1372 字节。`ExchangePacket` 仅支持未分片 IPv4 ICMP Echo；实际可用性取决于控制器授权和网关支持。IPv6 目标未实现。
