@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	protocolTCP = 6
-	protocolUDP = 17
-	procPath    = "/Applications/aTrust.app/Contents/Resources/bin/aTrustXtunnel"
+	protocolICMP = 1
+	protocolTCP  = 6
+	protocolUDP  = 17
+	procPath     = "/Applications/aTrust.app/Contents/Resources/bin/aTrustXtunnel"
 )
 
 // authRequestIP field order is protocol-significant: the gateway expects
@@ -70,14 +71,9 @@ var procFingerprint = fmt.Sprintf("%X", sha256.Sum256([]byte(procPath)))
 // buildAuthRequestIP serializes a per-flow auth body. domain is the original
 // hostname for wildcard-authorized targets (empty otherwise).
 func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net.IP, srcPort uint16, conntrackHash uint64, domain string, protocol int) ([]byte, error) {
-	network := ""
-	switch protocol {
-	case protocolTCP:
-		network = "tcp"
-	case protocolUDP:
-		network = "udp"
-	default:
-		return nil, fmt.Errorf("unsupported IP protocol %d", protocol)
+	network, err := protocolName(protocol)
+	if err != nil {
+		return nil, err
 	}
 	// connectionId = MD5(device_id).upper() + "-" + unix microseconds.
 	connID := fmt.Sprintf("%X-%d", md5.Sum([]byte(deviceID)), time.Now().UnixMicro())
@@ -116,4 +112,17 @@ func buildAuthRequestIP(sid, appID, deviceID, dstIP string, dstPort int, vip net
 		XRequestSig: "",
 	}
 	return json.Marshal(req)
+}
+
+func protocolName(protocol int) (string, error) {
+	switch protocol {
+	case protocolTCP:
+		return "tcp", nil
+	case protocolUDP:
+		return "udp", nil
+	case protocolICMP:
+		return "icmp", nil
+	default:
+		return "", fmt.Errorf("unsupported IP protocol %d", protocol)
+	}
 }

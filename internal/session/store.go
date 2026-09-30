@@ -4,6 +4,7 @@
 package session
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -14,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"geektrust/internal/privatefile"
 )
 
 // State is the persisted session (encrypted, 0600).
@@ -52,7 +55,10 @@ func (s *Store) keyPath() string { return s.path + ".key" }
 
 // Load reads and decrypts the state. It returns (nil, nil) when no state file
 // exists yet.
-func (s *Store) Load() (*State, error) {
+func (s *Store) Load(ctx context.Context) (*State, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	sealed, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -76,7 +82,10 @@ func (s *Store) Load() (*State, error) {
 }
 
 // Save encrypts and atomically writes the state.
-func (s *Store) Save(st *State) error {
+func (s *Store) Save(ctx context.Context, st *State) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	st.SavedAt = time.Now()
 	plain, err := json.Marshal(st)
 	if err != nil {
@@ -105,12 +114,8 @@ func (s *Store) readKey() ([]byte, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("%s: expected 32 bytes, got %d", path, len(key))
 	}
-	// Tighten a pre-existing permissive mode so the key never stays
-	// group/world readable.
-	if info, err := os.Stat(path); err == nil && info.Mode().Perm()&0o077 != 0 {
-		if err := os.Chmod(path, 0o600); err != nil {
-			return nil, fmt.Errorf("%s: tighten permissions: %w", path, err)
-		}
+	if err := privatefile.Protect(path); err != nil {
+		return nil, fmt.Errorf("protect state key: %w", err)
 	}
 	return key, nil
 }
@@ -137,6 +142,11 @@ func (s *Store) loadOrCreateKey() ([]byte, error) {
 		if errors.Is(err, os.ErrExist) {
 			return s.readKey()
 		}
+		return nil, err
+	}
+	if err := privatefile.Protect(s.keyPath()); err != nil {
+		f.Close()
+		os.Remove(s.keyPath())
 		return nil, err
 	}
 	_, werr := f.Write(key)
@@ -197,6 +207,10 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
+	if err := privatefile.Protect(tmpName); err != nil {
+		tmp.Close()
+		return err
+	}
 	if _, err := io.WriteString(tmp, string(data)); err != nil {
 		tmp.Close()
 		return err
@@ -214,3 +228,11 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	return os.Rename(tmpName, path)
 }
+
+// StateStore persists session state; embedding applications can supply protected storage.
+type StateStore interface {
+	Load(context.Context) (*State, error)
+	Save(context.Context, *State) error
+}
+
+func (p *Provider) SetStore(store StateStore) { p.store = store }

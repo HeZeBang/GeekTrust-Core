@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -66,7 +67,7 @@ func TestInitializeDefaultsAndPreservesExistingConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Errorf("config mode = %o, want 600", info.Mode().Perm())
 	}
 	loaded, err := Load(path)

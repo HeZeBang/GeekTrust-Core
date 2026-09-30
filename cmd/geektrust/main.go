@@ -128,18 +128,20 @@ func cmdLogin(ctx context.Context, cfg *config.Config, logger *slog.Logger, args
 	fresh := fs.Bool("fresh", false, "force a full login even if the persisted session is still online")
 	fs.Parse(args)
 
-	provider := session.NewProvider(cfg, logger, smsPrompt)
-	var cred *session.Credential
-	var err error
-	if *fresh {
-		cred, err = provider.ForceLogin(ctx)
-	} else {
-		cred, err = provider.Credential(ctx)
-	}
+	c, err := commandClient(cfg, logger)
 	if err != nil {
 		return err
 	}
-	printSummary(cred)
+	defer c.Close()
+	connect := c.Connect
+	if *fresh {
+		connect = c.Authenticate
+	}
+	info, err := connect(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("gateways: %s\ndns: %s\nauthorized resources: %d\n", strings.Join(info.Gateways, ", "), strings.Join(info.DNS, ", "), len(info.Resources))
 	return nil
 }
 
@@ -259,6 +261,7 @@ func runVPN(ctx context.Context, cfg *config.Config, logger *slog.Logger, provid
 	go provider.CheckLoop(ctx, 5*time.Minute)
 
 	manager := tunnel.NewManager(provider, logger)
+	manager.GatewayTLSConfig = &tls.Config{ServerName: cfg.GatewayServerName()}
 	defer manager.Close()
 	dialer := &l3.Dialer{Manager: manager, Provider: provider, Logger: logger}
 	res := resolver.New(provider, dialer)
@@ -334,21 +337,13 @@ func cmdDial(ctx context.Context, cfg *config.Config, logger *slog.Logger, args 
 		return fmt.Errorf("invalid port %q", portStr)
 	}
 
-	provider := session.NewProvider(cfg, logger, smsPrompt)
-	manager := tunnel.NewManager(provider, logger)
-	defer manager.Close()
-	dialer := &l3.Dialer{Manager: manager, Provider: provider, Logger: logger}
-
-	// Resolve exactly like the inbound layer: exact domain mapping first,
-	// then public DNS/IP policy and tunneled split-horizon DNS fallback.
-	res := resolver.New(provider, dialer)
-	target, err := res.Resolve(ctx, host, port)
+	c, err := commandClient(cfg, logger)
 	if err != nil {
 		return err
 	}
-
+	defer c.Close()
 	start := time.Now()
-	conn, err := dialer.Dial(ctx, target.IP, port, target.AppID, target.Domain)
+	conn, err := c.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		return err
 	}

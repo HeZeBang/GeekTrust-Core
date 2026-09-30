@@ -5,12 +5,13 @@ package resolver
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"time"
 
 	"geektrust/internal/session"
 )
@@ -35,27 +36,44 @@ var DefaultPublicDNS = []string{"223.5.5.5", "119.29.29.29"}
 
 // Resolver resolves targets against the live credential's routing policy.
 type Resolver struct {
-	provider session.CredentialProvider
-	tunnel   TunnelDialer
-	stages   []*net.Resolver // direct public resolvers, then the system resolver
+	provider  session.CredentialProvider
+	tunnel    TunnelDialer
+	stages    []lookupStage // direct public resolvers, then the system resolver
+	tunnelDNS *dnsPool
 }
 
 // New builds a Resolver. Controller-pushed or configured DNS servers are read
 // from the live credential and reached through tunnel.
 func New(provider session.CredentialProvider, tunnel TunnelDialer) *Resolver {
-	pool := append([]string(nil), DefaultPublicDNS...)
-	var next atomic.Uint32
-	custom := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			// Honor the requested network: the resolver retries truncated
-			// answers over TCP, which needs the length-prefixed TCP
-			// exchange, not another UDP socket.
-			server := pool[(next.Add(1)-1)%uint32(len(pool))]
-			return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(server, "53"))
-		},
+	return NewWithDialer(provider, tunnel, nil)
+}
+
+// NewWithDialer allows a host to protect direct DNS traffic from tunnel routes.
+func NewWithDialer(provider session.CredentialProvider, tunnel TunnelDialer, dial func(context.Context, string, string) (net.Conn, error)) *Resolver {
+	return NewWithDialerOptions(provider, tunnel, dial, false)
+}
+
+// NewWithDialerOptions can omit the host system resolver when an embedding
+// application has installed its own VPN DNS endpoint. This prevents recursive
+// queries back into the application's Fake-IP DNS service.
+func NewWithDialerOptions(provider session.CredentialProvider, tunnel TunnelDialer, dial func(context.Context, string, string) (net.Conn, error), disableSystem bool) *Resolver {
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
 	}
-	return &Resolver{provider: provider, tunnel: tunnel, stages: []*net.Resolver{custom, net.DefaultResolver}}
+	pool := append([]string(nil), DefaultPublicDNS...)
+	publicDNS := newDNSPool()
+	stages := []lookupStage{func(ctx context.Context, host string) (net.IP, error) {
+		return publicDNS.lookup(ctx, host, "public", pool, dial)
+	}}
+	if !disableSystem {
+		system := &net.Resolver{PreferGo: true, Dial: dial}
+		stages = append(stages, func(ctx context.Context, host string) (net.IP, error) {
+			stageCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			return lookupIPv4With(stageCtx, system, host)
+		})
+	}
+	return &Resolver{provider: provider, tunnel: tunnel, stages: stages, tunnelDNS: newDNSPool()}
 }
 
 // Resolution is a resolved dial target.
@@ -103,10 +121,19 @@ func (r *Resolver) resolve(ctx context.Context, host string, port int, protocol 
 		}, nil
 	}
 	if rule, ok := cred.Policy.MatchDomainProtocol(host, port, protocol); ok {
+		domain := ""
+		if rule.IP == "" {
+			ip, err := r.lookupIPv4(ctx, host, cred)
+			if err != nil {
+				return Resolution{}, err
+			}
+			rule.IP = ip.String()
+			domain = host
+		}
 		if isGatewayTarget(cred, host, net.ParseIP(rule.IP), port) {
 			return Resolution{}, fmt.Errorf("%w: %s", ErrGatewayLoop, net.JoinHostPort(host, strconv.Itoa(port)))
 		}
-		return Resolution{IP: rule.IP, AppID: rule.AppID}, nil
+		return Resolution{IP: rule.IP, AppID: rule.AppID, Domain: domain}, nil
 	}
 
 	v4, err := r.lookupIPv4(ctx, host, cred)
@@ -129,29 +156,65 @@ func routeDNSResult(cred *session.Credential, host string, port int, v4 net.IP, 
 	return Resolution{IP: v4.String(), AppID: cred.AppID}
 }
 
-// lookupIPv4 first tries direct public/system resolution. If those stages
-// produce no usable address, controller-pushed DNS servers are queried over
-// authenticated UDP flows inside the VPN.
+// lookupIPv4 tries public/system resolution before controller DNS. Public
+// and tunnel DNS use bounded UDP queries, TCP fallback and recoverable cooldowns.
 func (r *Resolver) lookupIPv4(ctx context.Context, host string, cred *session.Credential) (net.IP, error) {
 	var lastErr error = errNoIPv4Answer
-	for _, res := range r.stages {
-		if v4, err := lookupIPv4With(ctx, res, host); err == nil {
-			return v4, nil
+	for _, stage := range r.stages {
+		if ip, err := stage(ctx, host); err == nil {
+			return ip, nil
 		} else {
 			lastErr = err
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
-	if r.tunnel != nil {
-		for _, server := range cred.DNS {
-			res := r.tunnelResolver(cred, server)
-			if v4, err := lookupIPv4With(ctx, res, host); err == nil {
-				return v4, nil
-			} else {
-				lastErr = err
+	if r.tunnel != nil && len(cred.DNS) > 0 {
+		scope := r.tunnelDNSScope(cred)
+		return r.tunnelDNS.lookup(ctx, host, scope, cred.DNS, func(ctx context.Context, network, address string) (net.Conn, error) {
+			server, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
+			}
+			ip := net.ParseIP(server).To4()
+			if ip == nil {
+				return nil, fmt.Errorf("invalid tunnel DNS server %q", server)
+			}
+			appID := cred.AppID
+			if cred.Policy != nil {
+				appID = cred.Policy.AppIDForProtocol(ip, 53, appID, network)
+			}
+			if appID == "" {
+				return nil, errors.New("DNS server is not authorized")
+			}
+			if network == "tcp" {
+				return r.tunnel.Dial(ctx, ip.String(), 53, appID, "")
+			}
+			return r.tunnel.DialUDP(ctx, ip.String(), 53, appID, "")
+		})
+	}
+	return nil, lastErr
+}
+
+// Reset tunnel health after session, configured DNS, gateway or authorization
+// changes. Keep credentials out of map keys and diagnostics.
+func (r *Resolver) tunnelDNSScope(cred *session.Credential) string {
+	parts := []string{cred.SID, cred.AppID, strings.Join(cred.DNS, ","), strings.Join(cred.Gateways, ",")}
+	if cred.Policy != nil {
+		parts = append(parts, cred.Policy.MajorNodeGroup)
+	}
+	for _, server := range cred.DNS {
+		ip := net.ParseIP(server)
+		if cred.Policy != nil && ip != nil {
+			for _, network := range []string{"udp", "tcp"} {
+				app := cred.Policy.AppIDForProtocol(ip, 53, cred.AppID, network)
+				parts = append(parts, app, cred.Policy.AppNodeGroups[app], strings.Join(cred.Policy.GatewaysForApp(app), ","), strconv.FormatBool(cred.Policy.AppTCPPreferL3[app]))
 			}
 		}
 	}
-	return nil, lastErr
+	hash := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return string(hash[:])
 }
 
 func lookupIPv4With(ctx context.Context, res *net.Resolver, host string) (net.IP, error) {
@@ -168,30 +231,6 @@ func lookupIPv4With(ctx context.Context, res *net.Resolver, host string) (net.IP
 		}
 	}
 	return nil, errNoIPv4Answer
-}
-
-func (r *Resolver) tunnelResolver(cred *session.Credential, server string) *net.Resolver {
-	return &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			ip := net.ParseIP(server).To4()
-			if ip == nil {
-				return nil, fmt.Errorf("invalid tunnel DNS server %q", server)
-			}
-			protocol := "udp"
-			if network == "tcp" || network == "tcp4" {
-				protocol = "tcp"
-			}
-			appID := cred.AppID
-			if cred.Policy != nil {
-				appID = cred.Policy.AppIDForProtocol(ip, 53, appID, protocol)
-			}
-			if protocol == "tcp" {
-				return r.tunnel.Dial(ctx, ip.String(), 53, appID, "")
-			}
-			return r.tunnel.DialUDP(ctx, ip.String(), 53, appID, "")
-		},
-	}
 }
 
 func isGatewayTarget(cred *session.Credential, host string, resolved net.IP, port int) bool {
@@ -221,4 +260,28 @@ var errNoIPv4Answer = errors.New("no usable IPv4 answer")
 func IsFakeIP(ip net.IP) bool {
 	v4 := ip.To4()
 	return v4 != nil && v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)
+}
+
+// LookupHost resolves without imposing a particular destination port.
+func (r *Resolver) LookupHost(ctx context.Context, host string) ([]string, error) {
+	cred, err := r.provider.Credential(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.To4() == nil {
+			return nil, errNoIPv4Answer
+		}
+		return []string{ip.String()}, nil
+	}
+	for _, rule := range cred.Policy.DomainRules {
+		if strings.EqualFold(strings.TrimSuffix(host, "."), rule.Domain) && rule.IP != "" {
+			return []string{rule.IP}, nil
+		}
+	}
+	ip, err := r.lookupIPv4(ctx, host, cred)
+	if err != nil {
+		return nil, err
+	}
+	return []string{ip.String()}, nil
 }

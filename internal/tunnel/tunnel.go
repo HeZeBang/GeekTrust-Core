@@ -6,7 +6,10 @@ package tunnel
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -23,6 +26,10 @@ import (
 )
 
 const (
+	ipProtocolICMP = 1
+	ipProtocolTCP  = 6
+	ipProtocolUDP  = 17
+
 	// HeartbeatInterval is the 0x15 send period.
 	HeartbeatInterval = 20 * time.Second
 	// heartbeatWriteTimeout detects a wedged serialized write path promptly.
@@ -106,12 +113,80 @@ type Tunnel struct {
 var gatewayTLSSessionCache = tls.NewLRUClientSessionCache(64)
 
 func gatewayTLSConfig(addr string) *tls.Config {
-	cfg := &tls.Config{
-		InsecureSkipVerify: true,
-		ClientSessionCache: gatewayTLSSessionCache,
+	return gatewayTLSConfigWithTemplate(addr, nil)
+}
+
+func gatewayTLSConfigWithTemplate(addr string, template *tls.Config) *tls.Config {
+	cfg := &tls.Config{}
+	if template != nil {
+		cfg = template.Clone()
 	}
-	if host, _, err := net.SplitHostPort(addr); err == nil && net.ParseIP(host) == nil {
-		cfg.ServerName = host
+	if cfg.ClientSessionCache == nil {
+		cfg.ClientSessionCache = gatewayTLSSessionCache
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		if cfg.ServerName == "" {
+			cfg.ServerName = host
+		}
+	}
+	return cfg
+}
+
+type GatewayTrustStore interface {
+	LoadPin(context.Context, string) ([]byte, error)
+	SavePin(context.Context, string, []byte) error
+}
+
+func gatewayTLSConfigWithTrust(ctx context.Context, addr string, template *tls.Config, trust GatewayTrustStore) *tls.Config {
+	cfg := gatewayTLSConfigWithTemplate(addr, template)
+	if trust == nil {
+		return cfg
+	}
+	previous := cfg.VerifyConnection
+	cfg.InsecureSkipVerify = true // verification is performed below, including system roots
+	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
+			return errors.New("gateway sent no certificate")
+		}
+		if previous != nil {
+			if err := previous(cs); err != nil {
+				return err
+			}
+		}
+		intermediates := x509.NewCertPool()
+		for _, cert := range cs.PeerCertificates[1:] {
+			intermediates.AddCert(cert)
+		}
+		if _, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{DNSName: cfg.ServerName, Roots: cfg.RootCAs, Intermediates: intermediates}); err == nil {
+			return nil
+		}
+		leaf := cs.PeerCertificates[0]
+		// Controllers may advertise gateway IPs whose private-CA certificates
+		// contain DNS names only. The saved key is bound to the advertised IP:port.
+		if net.ParseIP(cfg.ServerName) == nil {
+			if err := leaf.VerifyHostname(cfg.ServerName); err != nil {
+				return fmt.Errorf("gateway certificate identity: %w", err)
+			}
+		}
+		now := time.Now()
+		if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
+			return errors.New("gateway certificate expired or not yet valid")
+		}
+		pin := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+		stored, err := trust.LoadPin(ctx, addr)
+		if err != nil {
+			return fmt.Errorf("load trusted gateway pin: %w", err)
+		}
+		if len(stored) == 0 {
+			if err := trust.SavePin(ctx, addr, pin[:]); err != nil {
+				return fmt.Errorf("save trusted gateway pin: %w", err)
+			}
+			return nil
+		}
+		if len(stored) != len(pin) || subtle.ConstantTimeCompare(stored, pin[:]) != 1 {
+			return errors.New("gateway public key changed")
+		}
+		return nil
 	}
 	return cfg
 }
@@ -498,7 +573,7 @@ func (t *Tunnel) handleAuthResponse(payload []byte) {
 // dispatch routes a downlink IPv4 TCP or UDP packet to the flow owning its
 // destination port (our virtual source port).
 func (t *Tunnel) dispatch(pkt []byte) {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 || (pkt[9] != 6 && pkt[9] != 17) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || (pkt[9] != ipProtocolTCP && pkt[9] != ipProtocolUDP && pkt[9] != ipProtocolICMP) {
 		return
 	}
 	ihl := int(pkt[0]&0x0F) * 4
@@ -506,6 +581,12 @@ func (t *Tunnel) dispatch(pkt []byte) {
 		return
 	}
 	dport := binary.BigEndian.Uint16(pkt[ihl+2 : ihl+4])
+	if pkt[9] == ipProtocolICMP {
+		if len(pkt) < ihl+8 || pkt[ihl] != 0 {
+			return
+		}
+		dport = binary.BigEndian.Uint16(pkt[ihl+4 : ihl+6])
+	}
 	t.connsMu.Lock()
 	sink := t.conns[dport]
 	t.connsMu.Unlock()

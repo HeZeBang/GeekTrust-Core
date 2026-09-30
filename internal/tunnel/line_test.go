@@ -3,12 +3,15 @@ package tunnel
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -34,7 +37,11 @@ func TestBestRequiresGatewayTLS(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	got, err := NewLines([]string{plain.Addr().String(), tlsAddr}).Best(ctx)
+	lines := NewLines([]string{plain.Addr().String(), tlsAddr})
+	roots := x509.NewCertPool()
+	roots.AddCert(tlsServer.Certificate())
+	lines.TLSConfig = &tls.Config{RootCAs: roots}
+	got, err := lines.Best(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,6 +52,57 @@ func TestBestRequiresGatewayTLS(t *testing.T) {
 	case <-accepted:
 	case <-ctx.Done():
 		t.Fatal("plain TCP endpoint was not probed")
+	}
+}
+
+func TestGatewayTLSRejectsUntrustedCertificateByDefault(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "https://")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := NewLines([]string{addr}).Best(ctx); err == nil {
+		t.Fatal("untrusted gateway certificate was accepted")
+	}
+}
+
+type testPinStore struct {
+	mu   sync.Mutex
+	pins map[string][]byte
+}
+
+func (s *testPinStore) LoadPin(_ context.Context, addr string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.pins[addr]...), nil
+}
+func (s *testPinStore) SavePin(_ context.Context, addr string, pin []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pins[addr] = append([]byte(nil), pin...)
+	return nil
+}
+
+func TestGatewayTrustOnFirstUsePinsPublicKey(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "https://")
+	store := &testPinStore{pins: map[string][]byte{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	newLines := func() *Lines { l := NewLines([]string{addr}); l.GatewayTrustStore = store; return l }
+	if _, err := newLines().Best(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if pin, _ := store.LoadPin(ctx, addr); len(pin) != 32 {
+		t.Fatal("gateway public key was not persisted")
+	}
+	if _, err := newLines().Best(ctx); err != nil {
+		t.Fatalf("matching gateway pin rejected: %v", err)
+	}
+	store.SavePin(ctx, addr, make([]byte, 32))
+	if _, err := newLines().Best(ctx); err == nil || !strings.Contains(err.Error(), "public key changed") {
+		t.Fatalf("changed gateway key accepted: %v", err)
 	}
 }
 
@@ -71,7 +129,11 @@ func TestDialTLSReturnsLiveWinnerWithoutWaitingForStalledLine(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	started := time.Now()
-	conn, addr, err := NewLines([]string{stalled.Addr().String(), tlsAddr}).DialTLS(ctx)
+	lines := NewLines([]string{stalled.Addr().String(), tlsAddr})
+	roots := x509.NewCertPool()
+	roots.AddCert(tlsServer.Certificate())
+	lines.TLSConfig = &tls.Config{RootCAs: roots}
+	conn, addr, err := lines.DialTLS(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

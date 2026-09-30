@@ -1,8 +1,10 @@
 package session
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -11,7 +13,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	st := NewStore(filepath.Join(dir, "state.enc"))
 
 	// No file yet → (nil, nil).
-	got, err := st.Load()
+	got, err := st.Load(context.Background())
 	if err != nil || got != nil {
 		t.Fatalf("Load on empty = %v, %v; want nil, nil", got, err)
 	}
@@ -24,7 +26,7 @@ func TestStoreRoundTrip(t *testing.T) {
 		Gateways:   []string{"192.0.2.10:441"},
 		ClientType: "client",
 	}
-	if err := st.Save(want); err != nil {
+	if err := st.Save(context.Background(), want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -41,12 +43,12 @@ func TestStoreRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm() != 0o600 {
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 			t.Errorf("%s perm = %o, want 600", name, info.Mode().Perm())
 		}
 	}
 
-	got, err = st.Load()
+	got, err = st.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -63,7 +65,7 @@ func TestStoreRoundTrip(t *testing.T) {
 
 	// The key must be stable across saves (same key file reused).
 	key1, _ := os.ReadFile(filepath.Join(dir, "state.enc.key"))
-	if err := st.Save(want); err != nil {
+	if err := st.Save(context.Background(), want); err != nil {
 		t.Fatal(err)
 	}
 	key2, _ := os.ReadFile(filepath.Join(dir, "state.enc.key"))
@@ -75,14 +77,14 @@ func TestStoreRoundTrip(t *testing.T) {
 func TestStoreWrongKey(t *testing.T) {
 	dir := t.TempDir()
 	st := NewStore(filepath.Join(dir, "state.enc"))
-	if err := st.Save(&State{SID: "s"}); err != nil {
+	if err := st.Save(context.Background(), &State{SID: "s"}); err != nil {
 		t.Fatal(err)
 	}
 	// Corrupt the key.
 	if err := os.WriteFile(filepath.Join(dir, "state.enc.key"), make([]byte, 32), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Load(); err == nil {
+	if _, err := st.Load(context.Background()); err == nil {
 		t.Fatal("expected decrypt failure with wrong key")
 	}
 }
@@ -94,7 +96,7 @@ func TestStoreInvalidKeyNotOverwritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := NewStore(filepath.Join(dir, "state.enc"))
-	if err := st.Save(&State{SID: "s"}); err == nil {
+	if err := st.Save(context.Background(), &State{SID: "s"}); err == nil {
 		t.Fatal("Save must fail on a present-but-invalid key file, not regenerate it")
 	}
 	got, _ := os.ReadFile(keyPath)

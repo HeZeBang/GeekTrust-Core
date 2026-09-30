@@ -27,7 +27,7 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.BaseURL != DefaultBaseURL {
 		t.Errorf("base_url default = %q", cfg.BaseURL)
 	}
-	if cfg.Platform != "Mac" || cfg.AppID != DefaultAppID || cfg.StateFile != "./state.enc" || cfg.LogLevel != "info" {
+	if cfg.Platform != "Mac" || cfg.StateFile != "./state.enc" || cfg.LogLevel != "info" {
 		t.Errorf("defaults wrong: %+v", cfg)
 	}
 	if cfg.ClientType != "browser" {

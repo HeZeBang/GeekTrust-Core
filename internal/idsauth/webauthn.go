@@ -54,6 +54,9 @@ type clientDataJSON struct {
 // requestOptions (result.request.publicKeyCredentialRequestOptions) and
 // returns its JSON encoding plus the incremented sign count.
 func buildAssertion(requestOptions map[string]any, k *Keystore, origin string) ([]byte, int, error) {
+	if requestOptions["userVerification"] == "required" {
+		return nil, 0, fmt.Errorf("software passkey cannot satisfy required user verification")
+	}
 	rpID, _ := requestOptions["rpId"].(string)
 	challenge, _ := requestOptions["challenge"].(string)
 	if rpID == "" || challenge == "" {
@@ -86,6 +89,9 @@ func buildAssertion(requestOptions map[string]any, k *Keystore, origin string) (
 	count, err := k.SignCount()
 	if err != nil {
 		return nil, 0, err
+	}
+	if count < 0 || uint64(count) >= 0xffffffff {
+		return nil, 0, fmt.Errorf("signature counter exhausted")
 	}
 	newCount := count + 1
 

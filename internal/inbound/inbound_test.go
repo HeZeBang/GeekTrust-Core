@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -259,7 +258,28 @@ func (*directUDPDialer) Dial(context.Context, string, int, string, string) (net.
 }
 
 func (*directUDPDialer) DialUDP(ctx context.Context, ip string, port int, _, _ string) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, "udp4", net.JoinHostPort(ip, strconv.Itoa(port)))
+	var lc net.ListenConfig
+	conn, err := lc.ListenPacket(ctx, "udp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	return &directUDPConn{
+		UDPConn: conn.(*net.UDPConn),
+		remote:  &net.UDPAddr{IP: net.ParseIP(ip), Port: port},
+	}, nil
+}
+
+type directUDPConn struct {
+	*net.UDPConn
+	remote *net.UDPAddr
+}
+
+func (c *directUDPConn) RemoteAddr() net.Addr { return c.remote }
+
+func (c *directUDPConn) Write(payload []byte) (int, error) {
+	// Go 1.24's connected UDPConn.Write skips empty datagrams on Windows.
+	// WriteToUDP preserves them, matching the production gVisor connection.
+	return c.UDPConn.WriteToUDP(payload, c.remote)
 }
 
 func startUDPEcho(t *testing.T) *net.UDPAddr {
@@ -457,6 +477,7 @@ func TestHTTPConnectUDPRelay(t *testing.T) {
 	}
 	roundTrip([]byte("http-udp"))
 	roundTrip(nil)
+	roundTrip([]byte("after-empty"))
 }
 
 func TestHTTPConnectUDPRejectsMalformedUpgrade(t *testing.T) {

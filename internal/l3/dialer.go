@@ -27,9 +27,10 @@ const (
 // Dialer establishes authenticated IP flows through the tunnel. Inbound
 // proxies use TCP; the resolver also uses connected UDP for internal DNS.
 type Dialer struct {
-	Manager  *tunnel.Manager
-	Provider session.CredentialProvider
-	Logger   *slog.Logger
+	MaxAttempts int
+	Manager     *tunnel.Manager
+	Provider    session.CredentialProvider
+	Logger      *slog.Logger
 
 	stackMu sync.Mutex
 	stacks  map[*tunnel.Tunnel]*tcpStack
@@ -42,26 +43,30 @@ func (d *Dialer) Dial(ctx context.Context, ip string, port int, appID, domain st
 	if err := validateTarget(ip, port); err != nil {
 		return nil, err
 	}
-	conn, err := d.Manager.DialTCP(ctx, ip, port, appID, domain)
-	if err == nil {
-		return conn, nil
+	cred, err := d.Provider.Credential(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if !tunnel.ShouldFallbackToL3(err) {
-		return nil, fmt.Errorf("dial %s:%d through direct TCP tunnel: %w", ip, port, err)
+	if cred.Policy == nil || appID == "" {
+		return nil, fmt.Errorf("target has no authorizing application")
 	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	if !cred.Policy.AppTCPPreferL3[appID] {
+		conn, err := d.Manager.DialTCP(ctx, ip, port, appID, domain)
+		if err == nil {
+			return conn, nil
+		}
+		if !tunnel.ShouldFallbackToL3(err) {
+			return nil, err
+		}
+		d.Logger.Debug("direct TCP unavailable; falling back to L3", "ip", ip, "port", port, "err", err)
 	}
-	d.Logger.Warn("direct TCP tunnel unavailable; falling back to L3",
-		"ip", ip, "port", port, "err", err)
 	return d.dialWithRetry(ctx, "tcp", ip, port, func() (net.Conn, error) {
 		return d.dialOnce(ctx, ip, port, appID, domain)
 	})
 }
 
 // DialUDP opens an authenticated connected UDP flow. It is intentionally
-// exposed only to internal services such as split-horizon DNS; SOCKS5 UDP
-// ASSOCIATE remains unsupported.
+// used by the proxy relays and split-horizon DNS resolver.
 func (d *Dialer) DialUDP(ctx context.Context, ip string, port int, appID, domain string) (net.Conn, error) {
 	if err := validateTarget(ip, port); err != nil {
 		return nil, err
@@ -84,7 +89,11 @@ func validateTarget(ip string, port int) error {
 func (d *Dialer) dialWithRetry(ctx context.Context, network, ip string, port int, dial func() (net.Conn, error)) (net.Conn, error) {
 	var lastErr error
 	attempts := 0
-	for attempt := range dialAttempts {
+	limit := d.MaxAttempts
+	if limit <= 0 {
+		limit = dialAttempts
+	}
+	for attempt := range limit {
 		attempts = attempt + 1
 		if attempt > 0 {
 			d.Logger.Debug("dial retry", "network", network, "ip", ip, "port", port,
@@ -144,7 +153,7 @@ type AuthRejectedError struct {
 }
 
 func (e *AuthRejectedError) Error() string {
-	return fmt.Sprintf("per-conn auth rejected: code %d: %s", e.Code, e.Message)
+	return fmt.Sprintf("per-conn auth rejected: code %d", e.Code)
 }
 
 func (d *Dialer) stackFor(tun *tunnel.Tunnel) (*tcpStack, error) {
@@ -184,16 +193,30 @@ func (f *authorizedFlow) release() {
 }
 
 func (d *Dialer) authorizeFlow(ctx context.Context, ip string, port int, appID, domain string, protocol int) (*authorizedFlow, error) {
-	tun, err := d.Manager.Tunnel(ctx)
-	if err != nil {
-		return nil, err
-	}
 	cred, err := d.Provider.Credential(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if appID == "" {
-		appID = cred.Policy.AppIDFor(net.ParseIP(ip).To4(), port, cred.AppID)
+		network, err := protocolName(protocol)
+		if err != nil {
+			return nil, err
+		}
+		if cred.Policy == nil {
+			return nil, errors.New("missing resource policy")
+		}
+		appID = cred.Policy.AppIDForProtocol(net.ParseIP(ip).To4(), port, cred.AppID, network)
+		if appID == "" {
+			return nil, fmt.Errorf("target has no authorizing application")
+		}
+	}
+	manager, err := d.Manager.ForApp(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	tun, err := manager.Tunnel(ctx)
+	if err != nil {
+		return nil, err
 	}
 	transport, err := d.stackFor(tun)
 	if err != nil {
@@ -226,7 +249,7 @@ func (d *Dialer) authorizeFlow(ctx context.Context, ip string, port int, appID, 
 		if rej.SwitchLine {
 			d.Logger.Warn("per-conn auth requests line switch",
 				"code", resp.Code, "message", resp.Message)
-			d.Manager.SwitchLine()
+			manager.SwitchLine()
 		}
 		return nil, rej
 	}

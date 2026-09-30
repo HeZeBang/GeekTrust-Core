@@ -3,6 +3,7 @@
 # build output
 /geektrust
 /dist/
+/.tmp/
 
 # runtime state & secrets
 *.keystore

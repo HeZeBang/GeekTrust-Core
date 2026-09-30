@@ -20,7 +20,10 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 	// casLogin is a /passport/v1 endpoint: the shared query parameters are
 	// mandatory, and the csrf header exists by now.
 	q := url.Values{}
-	q.Set("sfDomain", "Shanghaitech.edu.cn")
+	if c.LoginDomain == "" {
+		return "", fmt.Errorf("controller did not supply a CAS login domain")
+	}
+	q.Set("sfDomain", c.LoginDomain)
 	q.Set("clientType", ClientTypeBrowser)
 	q.Set("platform", c.Platform)
 	q.Set("lang", DefaultLang)
@@ -41,7 +44,7 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 	var shortcutURL *url.URL
 	noFollow := *c.HTTP
 	noFollow.CheckRedirect = func(r *http.Request, via []*http.Request) error {
-		if r.URL.Path == "/portal/shortcut.html" {
+		if r.URL.Host == base.Host && r.URL.Scheme == base.Scheme && r.URL.Path == "/portal/shortcut.html" {
 			shortcutURL = r.URL
 			return http.ErrUseLastResponse
 		}
@@ -56,7 +59,7 @@ func (c *Client) CasTicket(ctx context.Context) (string, error) {
 	}
 	resp, err := noFollow.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("cas chain: %w", err)
+		return "", fmt.Errorf("cas chain request failed")
 	}
 	resp.Body.Close()
 

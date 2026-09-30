@@ -28,16 +28,16 @@ type Resource struct {
 	// the L3 tunnel can continue to use the flattened Gateways list.
 	NodeGroups map[string][]string
 	// AppNodeGroups maps an appId to its assigned node group.
-	AppNodeGroups map[string]string
+	AppNodeGroups  map[string]string
+	AppTCPPreferL3 map[string]bool
 	// MajorNodeGroup is the controller's fallback node group.
 	MajorNodeGroup string
 	// DNS are controller-pushed resolver addresses, if any.
 	DNS []string
 }
 
-// GatewaysForApp returns the node-group gateway list assigned to appID. It
-// falls back to the major group, then to the flattened list for legacy
-// resource responses that do not carry node-group identifiers.
+// GatewaysForApp selects only the assigned group. A missing assigned group
+// is an invalid policy, never permission to use another group's gateways.
 func (r *Resource) GatewaysForApp(appID string) []string {
 	if r == nil {
 		return nil
@@ -46,8 +46,8 @@ func (r *Resource) GatewaysForApp(appID string) []string {
 	if groupID == "" {
 		groupID = r.MajorNodeGroup
 	}
-	if gateways := r.NodeGroups[groupID]; len(gateways) > 0 {
-		return append([]string(nil), gateways...)
+	if groupID != "" {
+		return append([]string(nil), r.NodeGroups[groupID]...)
 	}
 	return append([]string(nil), r.Gateways...)
 }
@@ -221,9 +221,10 @@ type clientResource struct {
 		Data struct {
 			AppInfo []struct {
 				Apps []struct {
-					ID          string `json:"id"`
-					NodeGroupID string `json:"nodeGroupId"`
-					AddressList []struct {
+					ID              string `json:"id"`
+					NodeGroupID     string `json:"nodeGroupId"`
+					EnableTCPPrefL3 bool   `json:"enableTCPPrefL3"`
+					AddressList     []struct {
 						Protocol string `json:"protocol"`
 						Port     string `json:"port"`
 						Host     string `json:"host"`
@@ -291,10 +292,12 @@ func (c *Client) parseResource(cr *clientResource) *Resource {
 	res := &Resource{
 		NodeGroups:     make(map[string][]string),
 		AppNodeGroups:  make(map[string]string),
+		AppTCPPreferL3: make(map[string]bool),
 		MajorNodeGroup: cr.AppList.Data.Config.NodeGroupConf.MajorNodeGroup.ID,
 	}
 	for _, group := range cr.AppList.Data.AppInfo {
 		for _, app := range group.Apps {
+			res.AppTCPPreferL3[app.ID] = app.EnableTCPPrefL3
 			if app.ID != "" && app.NodeGroupID != "" {
 				res.AppNodeGroups[app.ID] = app.NodeGroupID
 			}
@@ -350,7 +353,7 @@ func (c *Client) parseResource(cr *clientResource) *Resource {
 			// Domain → first internal IP of the same app, keeping each
 			// domain entry's own authorized port range. MatchDomain picks
 			// the most specific rule per (domain, port).
-			if firstIP != "" {
+			{
 				for _, d := range domains {
 					res.DomainRules = append(res.DomainRules, DomainRule{
 						Domain: normalizeHost(d.host), IP: firstIP, AppID: app.ID, Port: d.port, Proto: d.proto,
@@ -372,8 +375,10 @@ func (c *Client) parseResource(cr *clientResource) *Resource {
 				continue
 			}
 			addr = strings.ReplaceAll(addr, "{{sdpcHost}}", controllerHost)
-			if !strings.Contains(addr, ":") {
-				addr += ":441"
+			var valid bool
+			addr, valid = gatewayAddress(addr)
+			if !valid {
+				continue
 			}
 			if !seen[addr] {
 				seen[addr] = true
@@ -400,24 +405,44 @@ func (c *Client) parseResource(cr *clientResource) *Resource {
 }
 
 // parsePortRange parses addressList port specs: "443", "1-65535", "" / "all".
+// Invalid port data matches nothing; it must not widen controller policy.
 func parsePortRange(s string) PortRange {
 	s = strings.TrimSpace(s)
 	if s == "" || s == "all" {
 		return allPorts()
 	}
+	invalid := PortRange{Min: 1, Max: 0}
 	if lo, hi, ok := strings.Cut(s, "-"); ok {
-		min, err1 := strconv.Atoi(strings.TrimSpace(lo))
-		max, err2 := strconv.Atoi(strings.TrimSpace(hi))
-		if err1 == nil && err2 == nil {
+		min, e1 := strconv.Atoi(strings.TrimSpace(lo))
+		max, e2 := strconv.Atoi(strings.TrimSpace(hi))
+		if e1 == nil && e2 == nil && min >= 0 && max <= 65535 && min <= max {
 			return PortRange{min, max}
 		}
-		return allPorts()
+		return invalid
 	}
 	port, err := strconv.Atoi(s)
-	if err != nil {
-		return allPorts()
+	if err != nil || port < 0 || port > 65535 {
+		return invalid
 	}
 	return PortRange{port, port}
+}
+
+func gatewayAddress(address string) (string, bool) {
+	if ip := net.ParseIP(strings.Trim(address, "[]")); ip != nil {
+		return net.JoinHostPort(ip.String(), "441"), true
+	}
+	if !strings.Contains(address, ":") {
+		address = net.JoinHostPort(address, "441")
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || host == "" || strings.ContainsAny(host, "/?#@ ") {
+		return "", false
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", false
+	}
+	return net.JoinHostPort(host, port), true
 }
 
 func (c *Client) controllerHost() string {

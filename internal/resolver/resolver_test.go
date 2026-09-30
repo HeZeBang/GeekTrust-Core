@@ -55,7 +55,7 @@ func TestRouteDNSResultPrefersIPPolicy(t *testing.T) {
 			Proto:  "all",
 		}},
 	}
-	cred := &session.Credential{Policy: policy, AppID: "fallback-app"}
+	cred := &session.Credential{Policy: policy}
 
 	got := routeDNSResult(cred, "www.baidu.com", 443, ip, "tcp")
 	if got.IP != "180.101.49.44" || got.AppID != "ip-app" || got.Domain != "" {
@@ -70,7 +70,7 @@ func TestRouteDNSResultPrefersIPPolicy(t *testing.T) {
 
 	policy.SuffixRules = nil
 	got = routeDNSResult(cred, "www.baidu.com", 443, ip, "tcp")
-	if got.AppID != "fallback-app" || got.Domain != "" {
+	if got.AppID != "" || got.Domain != "" {
 		t.Fatalf("default resolution = %+v", got)
 	}
 }
@@ -90,7 +90,7 @@ func TestResolveUDPUsesUDPPolicy(t *testing.T) {
 		{IP: net.ParseIP("10.0.0.53"), AppID: "tcp-app", Port: sdpc.PortRange{Min: 53, Max: 53}, Proto: "tcp"},
 		{IP: net.ParseIP("10.0.0.53"), AppID: "udp-app", Port: sdpc.PortRange{Min: 53, Max: 53}, Proto: "udp"},
 	}}
-	r := New(&staticProvider{cred: &session.Credential{Policy: policy, AppID: "fallback"}}, nil)
+	r := New(&staticProvider{cred: &session.Credential{Policy: policy}}, nil)
 
 	udp, err := r.ResolveUDP(context.Background(), "10.0.0.53", 53)
 	if err != nil {
@@ -109,9 +109,10 @@ func TestResolveUDPUsesUDPPolicy(t *testing.T) {
 }
 
 type localDNSTunnel struct {
-	server *net.UDPAddr
-	ip     string
-	appID  string
+	blockedIP string
+	server    *net.UDPAddr
+	ip        string
+	appID     string
 }
 
 func (d *localDNSTunnel) Dial(context.Context, string, int, string, string) (net.Conn, error) {
@@ -119,6 +120,9 @@ func (d *localDNSTunnel) Dial(context.Context, string, int, string, string) (net
 }
 
 func (d *localDNSTunnel) DialUDP(_ context.Context, ip string, _ int, appID, _ string) (net.Conn, error) {
+	if ip == d.blockedIP {
+		return nil, errors.New("synthetic unavailable primary DNS")
+	}
 	d.ip, d.appID = ip, appID
 	return net.DialUDP("udp4", nil, d.server)
 }
@@ -162,11 +166,14 @@ func TestResolveFallsBackToControllerDNSThroughTunnel(t *testing.T) {
 	}()
 
 	cred := &session.Credential{
-		DNS:    []string{"10.13.87.17"},
-		Policy: &sdpc.Resource{},
-		AppID:  "fallback-app",
+		DNS: []string{"10.0.0.1", "10.13.87.17"},
+		Policy: &sdpc.Resource{IPRules: []sdpc.IPRule{
+			{IP: net.ParseIP("10.0.0.1"), AppID: "primary-dns-app", Proto: "udp", Port: sdpc.PortRange{Min: 53, Max: 53}},
+			{IP: net.ParseIP("10.13.87.17"), AppID: "dns-app", Proto: "udp", Port: sdpc.PortRange{Min: 53, Max: 53}},
+			{IP: net.ParseIP("10.20.30.40"), AppID: "web-app", Proto: "tcp", Port: sdpc.PortRange{Min: 443, Max: 443}},
+		}},
 	}
-	tunnel := &localDNSTunnel{server: server.LocalAddr().(*net.UDPAddr)}
+	tunnel := &localDNSTunnel{server: server.LocalAddr().(*net.UDPAddr), blockedIP: "10.0.0.1"}
 	r := New(&staticProvider{cred: cred}, tunnel)
 	r.stages = nil // isolate the split-horizon fallback from real network DNS
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -175,10 +182,10 @@ func TestResolveFallsBackToControllerDNSThroughTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.IP != "10.20.30.40" || got.AppID != "fallback-app" {
+	if got.IP != "10.20.30.40" || got.AppID != "web-app" {
 		t.Fatalf("resolution = %+v", got)
 	}
-	if tunnel.ip != "10.13.87.17" || tunnel.appID != "fallback-app" {
+	if tunnel.ip != "10.13.87.17" || tunnel.appID != "dns-app" {
 		t.Fatalf("DNS tunnel target = %s appID=%s", tunnel.ip, tunnel.appID)
 	}
 	if err := <-served; err != nil {
@@ -189,7 +196,6 @@ func TestResolveFallsBackToControllerDNSThroughTunnel(t *testing.T) {
 func TestResolveRejectsGatewayLoops(t *testing.T) {
 	cred := &session.Credential{
 		Gateways: []string{"10.13.90.147:441", "vpn.example:441"},
-		AppID:    "fallback-app",
 		Policy: &sdpc.Resource{DomainRules: []sdpc.DomainRule{{
 			Domain: "mapped.example",
 			IP:     "10.13.90.147",
@@ -210,7 +216,7 @@ func TestResolveRejectsGatewayLoops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("same gateway IP on another port: %v", err)
 	}
-	if got.IP != "10.13.90.147" || got.AppID != "fallback-app" {
+	if got.IP != "10.13.90.147" || got.AppID != "" {
 		t.Fatalf("non-gateway endpoint resolution = %+v", got)
 	}
 }

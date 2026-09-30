@@ -58,7 +58,7 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
-	return fmt.Sprintf("sdpc %s: code %d: %s", e.Op, e.Code, e.Message)
+	return fmt.Sprintf("sdpc %s: code %d", e.Op, e.Code)
 }
 
 // IsSessionExpired reports whether the error means the session is gone and a
@@ -86,7 +86,8 @@ type Client struct {
 	// ClientType selects the login path for reportEnv: ClientTypeBrowser
 	// (default) keeps the session in pure-web mode; ClientTypeDesktop marks
 	// it as client mode, which unlocks trusted-terminal management.
-	ClientType string
+	ClientType  string
+	LoginDomain string
 
 	csrf string
 }
@@ -188,7 +189,7 @@ func (c *Client) doJSONWithType(ctx context.Context, method, path, clientType st
 		return fmt.Errorf("sdpc %s: read response: %w", path, err)
 	}
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("sdpc %s: HTTP %d: %s", path, resp.StatusCode, truncate(raw, 256))
+		return fmt.Errorf("sdpc %s: HTTP %d", path, resp.StatusCode)
 	}
 
 	return parseEnvelopeInto(raw, path, out)
@@ -203,7 +204,7 @@ func parseEnvelope(raw []byte, out any) error {
 func parseEnvelopeInto(raw []byte, op string, out any) error {
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("sdpc %s: decode envelope: %w (body %s)", op, err, truncate(raw, 256))
+		return fmt.Errorf("sdpc %s: invalid response envelope", op)
 	}
 	if env.Code != CodeOK {
 		return &APIError{Op: op, Code: env.Code, Message: env.Message}

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -106,6 +108,7 @@ func TestCmdInitDefaultsAndFlags(t *testing.T) {
 		const deviceID = "0123456789ABCDEF0123456789ABCDEF"
 		if err := cmdInit(context.Background(), configPath, []string{
 			"--keystore", keystore,
+			"--state-file", filepath.Join(dir, "state.enc"),
 			"--device-id", deviceID,
 			"--client-type", "browser",
 		}); err != nil {
@@ -122,7 +125,7 @@ func TestCmdInitDefaultsAndFlags(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm() != 0o600 {
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 			t.Errorf("existing keystore mode = %04o, want 0600", info.Mode().Perm())
 		}
 	})
@@ -249,8 +252,16 @@ func TestValidateInitPaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := os.Symlink(realDir, linkDir); err != nil {
-			t.Fatal(err)
+			if runtime.GOOS != "windows" {
+				t.Fatal(err)
+			}
+			// Junctions exercise the same directory-alias collision without
+			// requiring Windows Developer Mode or an elevated token.
+			if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", linkDir, realDir).CombinedOutput(); err != nil {
+				t.Fatalf("create directory alias: %v: %s", err, output)
+			}
 		}
+		defer os.Remove(linkDir)
 		_, err := validateInitPaths(
 			filepath.Join(linkDir, "future"),
 			&config.Config{
@@ -264,6 +275,9 @@ func TestValidateInitPaths(t *testing.T) {
 	})
 
 	t.Run("symlink through other-writable parent", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows file modes do not represent Unix directory permissions")
+		}
 		targetDir := filepath.Join(dir, "safe-symlink-target")
 		unsafeDir := filepath.Join(dir, "unsafe-symlink-parent")
 		if err := os.Mkdir(targetDir, 0o700); err != nil {
@@ -292,6 +306,9 @@ func TestValidateInitPaths(t *testing.T) {
 	})
 
 	t.Run("other-writable config directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows file modes do not represent Unix directory permissions")
+		}
 		shared := filepath.Join(dir, "shared")
 		if err := os.Mkdir(shared, 0o700); err != nil {
 			t.Fatal(err)
@@ -312,6 +329,9 @@ func TestValidateInitPaths(t *testing.T) {
 	})
 
 	t.Run("other-writable keystore directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows file modes do not represent Unix directory permissions")
+		}
 		shared := filepath.Join(dir, "shared-keystore")
 		if err := os.Mkdir(shared, 0o700); err != nil {
 			t.Fatal(err)
@@ -332,6 +352,9 @@ func TestValidateInitPaths(t *testing.T) {
 	})
 
 	t.Run("private child under other-writable ancestor", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows file modes do not represent Unix directory permissions")
+		}
 		shared := filepath.Join(dir, "shared-ancestor")
 		privateChild := filepath.Join(shared, "private-child")
 		if err := os.Mkdir(shared, 0o700); err != nil {
@@ -356,6 +379,9 @@ func TestValidateInitPaths(t *testing.T) {
 	})
 
 	t.Run("sticky writable ancestor", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows file modes do not represent Unix directory permissions")
+		}
 		sticky := filepath.Join(dir, "sticky-ancestor")
 		privateChild := filepath.Join(sticky, "private-child")
 		if err := os.Mkdir(sticky, 0o700); err != nil {
@@ -436,6 +462,9 @@ func TestCmdInitBindPasskey(t *testing.T) {
 	})
 
 	t.Run("successful synthetic binder", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("fixture executes a POSIX shell script")
+		}
 		dir := t.TempDir()
 		logPath := filepath.Join(dir, "binder.log")
 		installSyntheticUVX(t, dir, `#!/bin/sh
@@ -472,7 +501,7 @@ printf 'synthetic-keystore' > "$keystore"
 		if err != nil {
 			t.Fatalf("binder did not create keystore: %v", err)
 		}
-		if info.Mode().Perm() != 0o600 {
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 			t.Errorf("keystore mode = %04o, want 0600", info.Mode().Perm())
 		}
 		if leftovers, err := filepath.Glob(filepath.Join(dir, ".geektrust-keystore-*")); err != nil || len(leftovers) != 0 {
@@ -534,6 +563,9 @@ exit 1
 	})
 
 	t.Run("binder must create keystore", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("fixture executes a POSIX shell script")
+		}
 		dir := t.TempDir()
 		installSyntheticUVX(t, dir, "#!/bin/sh\nexit 0\n")
 		t.Setenv("PATH", dir)

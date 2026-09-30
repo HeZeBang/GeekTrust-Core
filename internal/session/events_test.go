@@ -177,7 +177,7 @@ func newRestoreFixture(t *testing.T, handler http.HandlerFunc) *Provider {
 
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.enc")
-	if err := NewStore(statePath).Save(&State{
+	if err := NewStore(statePath).Save(context.Background(), &State{
 		SID:        "synthetic-sid",
 		DeviceID:   testDeviceID,
 		CsrfToken:  "synthetic-csrf",
@@ -193,6 +193,7 @@ func newRestoreFixture(t *testing.T, handler http.HandlerFunc) *Provider {
 		Platform:   "Mac",
 		ClientType: "browser",
 		StateFile:  statePath,
+		Gateways:   []string{"192.0.2.1:441"},
 	}, testLogger(), nil)
 }
 
