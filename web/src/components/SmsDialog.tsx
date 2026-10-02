@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { post, postJSON, ApiError, errorText } from "../api";
+import type { FriendlyError } from "../errors";
 import type { Snapshot } from "../types";
+import { ErrorText } from "./ErrorText";
 
 const RESEND_COOLDOWN = 60;
 
@@ -12,7 +14,7 @@ const RESEND_COOLDOWN = 60;
 export function SmsDialog({ snap }: { snap: Snapshot }) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [cooldown, setCooldown] = useState(RESEND_COOLDOWN);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -44,13 +46,13 @@ export function SmsDialog({ snap }: { snap: Snapshot }) {
       await post("/api/sms", { code, gen: snap.sms_gen });
       // 202 = 已投递;登录结果经 SSE 推送。验证失败会结束本次登录,
       // 弹窗随之关闭,状态卡片会显示失败原因。
-      setNotice("已提交,等待控制器验证…");
+      setNotice("已提交，等待服务端验证…");
     } catch (err) {
       setBusy(false);
       setError(
         errorText(err, "提交失败", {
           400: "验证码需为 6 位数字",
-          409: "验证码已被其他通道提交,或本轮验证已结束",
+          409: "验证码已在其他页面或终端提交，或本轮验证已结束",
         }),
       );
     }
@@ -64,13 +66,13 @@ export function SmsDialog({ snap }: { snap: Snapshot }) {
       const requestedGen = snap.sms_gen;
       const result = await postJSON<{ restarting?: boolean }>("/api/sms/resend", { gen: requestedGen });
       if (currentGen.current !== requestedGen) return;
-      setNotice(result.restarting ? "验证会话已过期,正在重新建立会话并发送新验证码…" : "验证码已重新发送");
+      setNotice(result.restarting ? "验证已过期，正在重新登录并发送新验证码…" : "验证码已重新发送");
       setCooldown(RESEND_COOLDOWN);
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {
         // 上一条验证码仍在有效期内:直接输入它,同时进入冷却防止连点。
         setCooldown(RESEND_COOLDOWN);
-        setError(err.message || "发送过于频繁,上一条验证码仍然有效");
+        setError(errorText(err, "发送过于频繁，上一条验证码仍然有效"));
       } else {
         setError(errorText(err, "重发失败", { 409: "本轮验证已结束" }));
       }
@@ -87,7 +89,7 @@ export function SmsDialog({ snap }: { snap: Snapshot }) {
         aria-labelledby="sms-title"
       >
         <h2 id="sms-title">短信验证</h2>
-        <p className="muted">控制器已向你的手机发送 6 位验证码,输入后继续登录。</p>
+        <p className="muted">6 位验证码已发送到你的手机，输入后继续登录。</p>
         <input
           ref={inputRef}
           value={code}
@@ -99,17 +101,17 @@ export function SmsDialog({ snap }: { snap: Snapshot }) {
           className="code-input mono"
           aria-label="6 位短信验证码"
         />
-        {error && <p className="error-text">{error}</p>}
+        {error && <ErrorText error={error} />}
         {notice && <p className="ok-text">{notice}</p>}
         <div className="actions">
           <button type="submit" disabled={busy || code.length !== 6}>
             {busy ? "验证中…" : "验证"}
           </button>
           <button type="button" className="secondary" onClick={() => void resend()} disabled={busy || cooldown > 0}>
-            {cooldown > 0 ? `重新发送(${cooldown}s)` : "重新发送"}
+            {cooldown > 0 ? `重新发送（${cooldown}s）` : "重新发送"}
           </button>
         </div>
-        <p className="muted small">也可以直接在运行 geektrust 的终端里输入验证码,两个通道先到先用。</p>
+        <p className="muted small">也可以在运行 geektrust 的终端中输入验证码，以先提交的为准。</p>
       </form>
     </div>
   );

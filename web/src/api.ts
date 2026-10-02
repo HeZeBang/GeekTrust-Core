@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { Snapshot, TrustDeviceList } from "./types";
+import { friendlyError, type FriendlyError } from "./errors";
 
 // ---------------------------------------------------------------------------
 // Live store. The SSE stream feeds full snapshots; a one-shot /api/status
@@ -86,16 +87,28 @@ export class ApiError extends Error {
   }
 }
 
-// errorText renders an unknown error for the UI: status-specific overrides
-// first (the server speaks English, the panel speaks Chinese), then the
-// server-provided text, then the generic fallback.
-export function errorText(err: unknown, fallback: string, overrides?: Record<number, string>): string {
+// The panel server's own rejections are English protocol strings; these
+// statuses get Chinese text unless the call site supplies something better.
+const PANEL_STATUS_TEXT: Record<number, string> = {
+  400: "请求无效，请刷新页面后重试",
+  403: "面板拒绝了该请求，请通过配置中 web.listen 的地址访问面板",
+  404: "面板服务不支持该操作，请刷新页面后重试",
+  405: "面板服务不支持该操作，请刷新页面后重试",
+};
+
+// errorText renders an unknown error for the UI: call-site overrides first,
+// then panel status defaults (the server speaks English, the panel speaks
+// Chinese), then the server text reduced by friendlyError, then the fallback.
+// The raw server text is kept as `detail` wherever it adds diagnostic value.
+export function errorText(err: unknown, fallback: string, overrides?: Record<number, string>): FriendlyError {
   if (err instanceof ApiError) {
     const specific = overrides?.[err.status];
-    if (specific) return specific;
-    return err.message || fallback;
+    if (specific) return { summary: specific };
+    const panel = PANEL_STATUS_TEXT[err.status];
+    if (panel) return { summary: panel, detail: err.message || undefined };
+    if (err.message) return friendlyError(err.message, fallback);
   }
-  return fallback;
+  return { summary: fallback };
 }
 
 async function doFetch(path: string, init?: RequestInit): Promise<Response> {

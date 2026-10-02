@@ -9,28 +9,28 @@
 // Undocumented codes are deliberately absent: the fallback below prefers the
 // controller's own Chinese message over a guess.
 const CODE_TEXT: Record<string, string> = {
-  "10000000": "该账号已登录,无需重复上线",
-  "10000001": "请求参数无效,请检查配置后重试",
-  "10000004": "服务端未找到会话,请重新登录",
-  "10000008": "接口签名校验失败,请检查系统时间与 device_id",
-  "75500000": "当前为纯 web 模式,服务端不允许绑定授信终端",
-  "75500001": "认证已超时,请重新登录",
-  "75500002": "会话已失效,请重新登录",
-  "75500006": "当前账号已在线,无需重复上线",
-  "75500304": "登录票据已失效,请重新登录",
-  "75500401": "验证码仍在有效期内,请直接输入上一条短信中的验证码",
-  "75599999": "控制器要求的前置步骤未完成,请重新登录",
+  "10000000": "该账号已登录，无需重复上线",
+  "10000001": "请求参数无效，请检查配置后重试",
+  "10000004": "服务端未找到会话，请重新登录",
+  "10000008": "服务端拒绝了该请求，请稍后重试",
+  "75500000": "当前为 browser 模式，服务端不允许绑定授信终端",
+  "75500001": "认证已超时，请重新登录",
+  "75500002": "会话已失效，请重新登录",
+  "75500006": "当前账号已在线，无需重复上线",
+  "75500304": "登录票据已失效，请重新登录",
+  "75500401": "验证码仍在有效期内，请输入上一条短信中的验证码",
+  "75599999": "登录前置步骤未完成，请重新登录",
 };
 
 // Transport failures, most specific first: a DNS or TLS error also mentions
 // the host, so ordering decides which explanation wins.
 const NET_RULES: ReadonlyArray<readonly [RegExp, string]> = [
-  [/no such host|dns/i, "无法解析控制器域名,请检查 DNS 或网络连接"],
-  [/connection refused/i, "控制器拒绝连接,请检查地址与端口"],
-  [/x509|certificate|tls handshake/i, "TLS 证书校验失败,请检查系统时间与证书信任"],
-  [/no route to host|network is unreachable/i, "网络不可达,请检查本机网络"],
-  [/i\/o timeout|context deadline exceeded|timed? ?out/i, "连接控制器超时,请检查网络"],
-  [/connection reset|broken pipe|unexpected eof|\beof\b/i, "与控制器的连接被中断,请重试"],
+  [/no such host|dns/i, "无法解析 VPN 服务器域名，请检查 DNS 或网络连接"],
+  [/connection refused/i, "VPN 服务器拒绝连接，请检查地址与端口"],
+  [/x509|certificate|tls handshake/i, "TLS 证书校验失败，请检查系统时间与证书信任"],
+  [/no route to host|network is unreachable/i, "网络不可达，请检查本机网络"],
+  [/i\/o timeout|context deadline exceeded|timed? ?out/i, "连接 VPN 服务器超时，请检查网络"],
+  [/connection reset|broken pipe|unexpected eof|\beof\b/i, "与 VPN 服务器的连接中断，请重试"],
   [/context canceled/i, "操作已取消"],
 ];
 
@@ -55,9 +55,12 @@ function lastChineseSegment(text: string): string | null {
   return null;
 }
 
-export function friendlyError(raw: string): FriendlyError {
+// friendlyError never surfaces an untranslated error chain as the summary:
+// text with no Chinese at all becomes `fallback`, and the original stays in
+// `detail` for the 详情 toggle.
+export function friendlyError(raw: string, fallback = "操作失败，请稍后重试"): FriendlyError {
   const text = raw.trim();
-  if (!text) return { summary: "未知错误" };
+  if (!text) return { summary: fallback };
 
   const code = text.match(/\bcode (\d{6,8})\b/);
   const mapped = code && CODE_TEXT[code[1]];
@@ -68,6 +71,7 @@ export function friendlyError(raw: string): FriendlyError {
   }
 
   const tail = lastChineseSegment(text);
-  if (tail && tail !== text) return { summary: tail, detail: text };
-  return { summary: text };
+  if (tail === text) return { summary: text };
+  if (tail) return { summary: tail, detail: text };
+  return { summary: fallback, detail: text };
 }

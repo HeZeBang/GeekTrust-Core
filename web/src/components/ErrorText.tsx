@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { friendlyError } from "../errors";
+import type { FriendlyError } from "../errors";
 
 // ErrorText shows the actionable line and keeps the original Go error chain
 // behind a toggle: out of the way for normal use, still there when the raw
 // controller code or transport detail is what you actually need.
-export function ErrorText({ raw, prefix }: { raw: string; prefix?: string }) {
+export function ErrorText({ error, prefix }: { error: FriendlyError; prefix?: string }) {
   const [open, setOpen] = useState(false);
-  const { summary, detail } = friendlyError(raw);
+  const { summary, detail } = error;
   return (
     <div className="error-block">
       <p className="error-text">

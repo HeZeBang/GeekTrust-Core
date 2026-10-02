@@ -1,4 +1,5 @@
 import type { Snapshot } from "../types";
+import { friendlyError, type FriendlyError } from "../errors";
 import { ErrorText } from "./ErrorText";
 
 const STATE_META: Record<string, { label: string; className: string }> = {
@@ -26,7 +27,7 @@ export function StatusCard({ snap, connected, onRelogin, reloginBusy, reloginErr
   connected: boolean;
   onRelogin: () => void;
   reloginBusy: boolean;
-  reloginError: string | null;
+  reloginError: FriendlyError | null;
 }) {
   const meta = stateMeta(snap.state, !connected);
   return (
@@ -36,8 +37,10 @@ export function StatusCard({ snap, connected, onRelogin, reloginBusy, reloginErr
         <span className={meta.className}>{meta.label}</span>
         <span className="muted">自 {formatDateTime(snap.since)}</span>
       </div>
-      {snap.last_error && <ErrorText raw={snap.last_error} prefix="最近错误:" />}
-      {snap.sms_pending && <p className="muted">等待短信验证码,可在弹窗或运行终端中输入。</p>}
+      {snap.last_error && (
+        <ErrorText error={friendlyError(snap.last_error, "登录失败")} prefix="最近错误：" />
+      )}
+      {snap.sms_pending && <p className="muted">等待短信验证码，可在弹窗或终端中输入。</p>}
       <div className="actions">
         <button
           onClick={onRelogin}
@@ -46,7 +49,7 @@ export function StatusCard({ snap, connected, onRelogin, reloginBusy, reloginErr
           {reloginBusy ? "正在请求…" : "重新登录"}
         </button>
       </div>
-      {reloginError && <p className="error-text">{reloginError}</p>}
+      {reloginError && <ErrorText error={reloginError} />}
     </section>
   );
 }

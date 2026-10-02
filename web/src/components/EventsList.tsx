@@ -26,7 +26,7 @@ export function EventsList({ events, dropped }: { events: HistoryEvent[]; droppe
   return (
     <section className="card">
       <h2>事件</h2>
-      {dropped > 0 && <p className="muted">有 {dropped} 条早期事件因缓冲上限被丢弃。</p>}
+      {dropped > 0 && <p className="muted">另有 {dropped} 条较早的事件未能记录。</p>}
       {events.length === 0 ? (
         <p className="muted">暂无事件</p>
       ) : (
@@ -35,7 +35,7 @@ export function EventsList({ events, dropped }: { events: HistoryEvent[]; droppe
             // Only login_failed carries a wrapped Go error chain; every other
             // kind is already a plain sentence that must not be rewritten.
             const text =
-              ev.kind === "login_failed" ? friendlyError(ev.message).summary : ev.message;
+              ev.kind === "login_failed" ? friendlyError(ev.message, "登录失败").summary : ev.message;
             return (
               <li key={`${ev.ts}-${events.length - i}`}>
                 <span className="mono muted ev-time">{formatTime(ev.ts)}</span>

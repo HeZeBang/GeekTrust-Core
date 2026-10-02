@@ -247,9 +247,9 @@ func (p *Provider) finishRefresh(call *refreshCall, cred *Credential, session *S
 	if err == nil {
 		p.cur = cred
 		if restored {
-			p.emit(Event{Kind: EventRestoreOK, Session: session, Message: "已恢复会话: " + session.DisplayName})
+			p.emit(Event{Kind: EventRestoreOK, Session: session, Message: "已恢复会话：" + session.DisplayName})
 		} else {
-			p.emit(Event{Kind: EventLoginSuccess, Session: session, Message: "会话已建立: " + session.DisplayName})
+			p.emit(Event{Kind: EventLoginSuccess, Session: session, Message: "会话已建立：" + session.DisplayName})
 		}
 	} else {
 		p.emit(Event{Kind: EventLoginFailed, Message: SanitizeErrorText(err.Error())})

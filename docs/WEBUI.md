@@ -1,6 +1,6 @@
 # geekTrust Web 面板设计文档
 
-本文档是 Web 面板特性的实施守则。实现必须与本文件一致；任何偏离都需要先修改本文件。
+本文档描述 Web 面板的设计约束与实现契约。修改面板相关代码时应同步更新本文件。
 
 ## 1. 目标与非目标
 
@@ -19,7 +19,7 @@
 - 不支持非回环监听，不引入认证/token 机制。远程访问由用户自行 SSH 端口转发。
 - 不修改登录协议、隧道、代理数据面的任何行为。
 - 不做多页面路由、用户偏好持久化、主题切换。
-- 不提交前端构建产物到 git；不要求纯 Go 构建者安装 Node。
+- 不提交前端构建产物到 git；纯 Go 构建不需要 Node（面板显示构建提示页）。
 
 ## 2. 配置
 
@@ -71,7 +71,7 @@ func (c *Config) WebEnabled() bool {
 
 ### 2.3 init 模板
 
-`internal/config/init.go` 的 `renderInitialConfig` 追加：
+`internal/config/init.go` 的 `renderInitialConfig` 输出:
 
 ```toml
 [web]
@@ -79,7 +79,7 @@ enabled = true
 listen = "127.0.0.1:8081"
 ```
 
-关键约束：`PrepareInitialConfig` 目前手工构造 `Config` 后直接调用 `cfg.validate()`（不经过 `applyDefaults`）。本特性要求在 `PrepareInitialConfig` 中、validate 之前调用 `cfg.applyDefaults()`，否则空 `Web.Listen` 会被新校验拒绝或渲染出空地址。init 测试须断言返回的 Config 与渲染出的 TOML 都包含 `[web]` 默认值。
+`PrepareInitialConfig` 在 validate 之前调用 `cfg.applyDefaults()`，确保 `Web.Listen` 已填默认值；init 测试断言返回的 Config 与渲染出的 TOML 都包含 `[web]` 默认值。
 
 ## 3. 架构
 
@@ -98,9 +98,9 @@ sdpc.Client (SendSMS / CheckSMSCode / trustDevice 系列)
 
 ### 3.1 启动顺序（cmdRun 重排，严格按序）
 
-1. 若 `!cfg.WebEnabled()`：保持现状——`session.NewProvider(cfg, logger, smsPrompt)`，后续步骤与现行 `cmdRun` 完全一致，不创建任何 web 组件。
-2. 若启用：先检查 `cfg.Web.Listen` 与任何**已启用**的 inbound 监听地址（`inbound.socks5`/`inbound.http`）是否相同；相同则 `logger.Warn`（面板与代理端口冲突）并退化为第 1 步的现状路径——绝不允许面板抢占端口导致 inbound 绑定失败。无冲突时同步执行 `net.Listen("tcp", cfg.Web.Listen)`。
-   - 失败：`logger.Warn`，`webActive=false`，退化为第 1 步的现状路径。
+1. 若 `!cfg.WebEnabled()`：`session.NewProvider(cfg, logger, smsPrompt)`，只用终端输入短信，不创建任何 web 组件。
+2. 若启用：先检查 `cfg.Web.Listen` 是否与任何**已启用**的 inbound 监听地址（`inbound.socks5`/`inbound.http`）重叠（端口按数值比较，主机按规范化 IP、通配地址与 localhost 判断）；重叠则 `logger.Warn` 并退化为第 1 步的路径——绝不允许面板抢占端口导致 inbound 绑定失败。无冲突时同步执行 `net.Listen("tcp", cfg.Web.Listen)`。
+   - 失败：`logger.Warn`，`webActive=false`，退化为第 1 步的路径。
    - 成功：`webActive=true`。
 3. webActive 时，严格按序装配：
    - `hub := webui.NewHub(cfg)`（持有静态配置字段）。
@@ -110,9 +110,9 @@ sdpc.Client (SendSMS / CheckSMSCode / trustDevice 系列)
    - `logger.Info("web panel", "url", "http://"+cfg.Web.Listen)`。
    - `defer`：以**新的** `context.WithTimeout(context.Background(), 5*time.Second)` 执行 `server.Shutdown`（不用 run 的 ctx，此时它可能已取消）。
 4. `provider.Credential(ctx)` —— 如需短信，此时面板已可访问。
-5. `CheckLoop`、`tunnel.Manager`、`inbound` 与现状一致。
+5. `CheckLoop`、`tunnel.Manager`、`inbound` 与无面板路径相同。
 
-致命登录失败（keystore 缺失等）维持现状：进程报错退出，面板随之关闭。短信等待属于阻塞等待输入而非失败，进程不退出，面板保持可用。
+致命登录失败（keystore 缺失等）：进程报错退出，面板随之关闭。短信等待属于阻塞等待输入而非失败，进程不退出，面板保持可用。
 
 ### 3.2 面板故障策略
 
@@ -191,8 +191,8 @@ type Observer interface{ OnSessionEvent(Event) }
 | 事件 | 触发位置 | Session | Message |
 |---|---|---|---|
 | `login_start` | `acquire` 判定需要完整登录处（restore 不适用/失败回退；每次 acquire 至多一次） | nil | `开始完整登录` |
-| `login_success` | `Credential` 成功写回后 | 填充 | `会话已建立: <DisplayName>` |
-| `restore_success` | `Credential` 成功写回后（restore 路径） | 填充 | `已恢复会话: <DisplayName>` |
+| `login_success` | `Credential` 成功写回后 | 填充 | `会话已建立：<DisplayName>` |
+| `restore_success` | `Credential` 成功写回后（restore 路径） | 填充 | `已恢复会话：<DisplayName>` |
 | `login_failed` | `Credential` 失败写回后 | nil | 脱敏后的错误文本 |
 | `invalidated` | `Invalidate()`、`InvalidateIfCurrent` 命中当前凭据时、`TryForceRelogin` 清会话时（均在清状态之后） | nil | `会话已失效` |
 
@@ -248,9 +248,9 @@ type smsPending struct {
 
 `NewBroker(onPendingChange func(pending bool, gen uint64))`：回调为必填参数且不可为 nil。布防时回调 `(true, 当前 gen)`，拆除时回调 `(false, 0)`；Hub 在同一锁内存入这两个值并据此发布 `sms_pending` 与 `sms_gen`（快照代与 Broker 代必然一致，不得另设计数器）。
 
-### 5.3 单一 stdin 读取器（修复已确认的孤儿 Scanner 缺陷）
+### 5.3 单一 stdin 读取器
 
-现有 `smsPrompt` 每次调用新建 goroutine + `bufio.Scanner(os.Stdin)`；ctx 取消后该 goroutine 残留并可能吞掉下一次输入的验证码。Broker 改为：
+无面板路径的 `smsPrompt` 每次调用新建 goroutine + `bufio.Scanner(os.Stdin)`；ctx 取消后该 goroutine 残留，可能吞掉下一次输入的验证码。Broker 改为：
 
 - 进程级**唯一** `stdinReader` goroutine：循环 `bufio.Scanner(os.Stdin)` 读行，每行交给 `broker.claimTerminal(code)`（免代校验，规则见 §5.4）。
 - 首次 `Prompt` 时懒启动（懒启动加锁防并发重复启动）；进程生命周期内不退出（run 进程级单例，可接受）。
@@ -289,7 +289,7 @@ type smsPending struct {
 
 ### 5.5 webActive=false
 
-不创建 Broker；`cmdRun` 直接使用原 `smsPrompt`（行为与现状完全一致）。
+不创建 Broker；`cmdRun` 直接使用 `smsPrompt`（终端输入）。
 
 ## 6. Hub 与状态快照（webui 包）
 
@@ -327,7 +327,7 @@ sessionActive     → online
 | `device_id`、`client_type`、`proxy` | 静态配置，始终存在 |
 | `user`、`gateways`、`dns` | 仅 `sessionActive` 时存在（来自最近一次 `SessionInfo` 的深拷贝）；否则 null |
 | `since` | 最近一次**状态值**变化的时间 |
-| `last_error` | `login_failed` 设置；`login_start` 清空 |
+| `last_error` | `login_failed` 设置；`login_start`、`login_success`、`restore_success` 清空 |
 | `events` | 内存环形缓冲最近 50 条，进程生命周期内保留（跨重登不清空） |
 | `events_dropped` | dispatcher 累计丢弃数，随事件 envelope 更新 |
 
@@ -338,8 +338,8 @@ sessionActive     → online
   "state": "online",
   "since": "2026-07-25T10:00:00+08:00",
   "last_error": null,
-  "user": { "username": "2022533000", "display_name": "陆天成", "client_ip": "10.19.244.163" },
-  "device_id": "A882F6E166A3808A3FB4A40B6CB82052",
+  "user": { "username": "2020000000", "display_name": "张三", "client_ip": "10.0.0.2" },
+  "device_id": "0123456789ABCDEF0123456789ABCDEF",
   "client_type": "client",
   "gateways": ["119.78.254.241:441"],
   "dns": ["10.15.44.11"],
@@ -348,7 +348,7 @@ sessionActive     → online
   "sms_gen": 0,
   "events_dropped": 0,
   "events": [
-    { "ts": "2026-07-25T10:00:01+08:00", "kind": "login_success", "message": "会话已建立: 陆天成" }
+    { "ts": "2026-07-25T10:00:01+08:00", "kind": "login_success", "message": "会话已建立：张三" }
   ]
 }
 ```
@@ -486,12 +486,14 @@ web/
 
 - `package-lock.json` 提交到 git（`npm ci` 可重现构建）。
 - 数据层 `api.ts`：fetch + `EventSource`；单例 store（`useSyncExternalStore`），不引入状态库。
-- 无路由，单页。UI 文案中文。样式手写 CSS（约 250 行），深浅色按 `prefers-color-scheme`。
+- 无路由，单页。UI 文案中文。样式手写 CSS，深浅色按 `prefers-color-scheme`。
 - 短信弹窗：`state === "sms_required"` 时自动弹出、输入框自动聚焦；提交时携带当前 `sms_gen`；提交后进入"验证中"等待状态推送；60 秒倒计时仅作提示（客户端计时）。重发发现认证会话过期时显示正在重建会话，旧代关闭后由新 `sms_gen` 重置表单并接收新验证码。
 - 错误展示 `errors.ts`：后端传来的是 Go 错误链（`check sms code: sdpc checkSms: code 75500403: 验证码错误`），
-  直接渲染会让面板显得像坏了。`friendlyError()` 依次尝试：§11.1 控制面错误码表 → 网络/TLS 特征 →
+  直接渲染会让面板显得像坏了。`friendlyError()` 依次尝试：控制面错误码表（TECHNICAL.md §11.1）→ 网络/TLS 特征 →
   错误链尾部的中文片段，得到一行可行动的中文；原文经 `ErrorText` 的「详情」按钮展开，排障信息不丢。
   未收录的错误码（如 75500403）不臆造语义，直接采用控制器自己的中文消息。
+  一次性 API 请求的错误经 `api.ts` 的 `errorText()` 处理：调用处按状态码覆盖 → 面板自身拒绝（400/403/404/405）的中文默认文案 →
+  `friendlyError()` 摘要 → 兜底文案。完全不含中文的错误链不作为摘要显示，改用调用处的中文兜底文案；原文一律放进「详情」。
 - 连接断开时状态灯置灰并停止呼吸动画（`.pill.stale`）：快照已不再刷新，绿灯不能继续冒充实时。
 - 授信终端在 browser 模式下**不整卡禁用**：服务端只拒绝绑定（`handleTrustBind` 的 `client_type` 前置检查，
   对应控制器 75500000），查询/取消授信/注销在任何会话都可用。实测 browser 会话 `GET /api/trust-devices`
@@ -546,7 +548,7 @@ build: web
 
 ### 9.3 页面布局
 
-单栏卡片流，最大宽度 960px 居中：顶栏（标题 + 大状态灯：绿 online / 黄 connecting、sms_required / 灰 offline）→ `StatusCard` + `UserCard`（并排，窄屏堆叠）→ `TrustDevices`（或 browser 模式说明卡）→ 操作区（`重新登录`，二次确认；409 时提示"登录正在进行中"）→ `EventsList`。`SmsDialog` 全局弹窗，优先级最高。
+单栏卡片流，最大宽度 960px 居中：顶栏（标题 + 状态灯：绿 online / 黄 connecting、sms_required / 灰 offline）→ `StatusCard`（含 `重新登录` 按钮，二次确认；409 时提示已有登录正在进行）+ `UserCard`（并排，窄屏堆叠）→ `TrustDevices`（browser 模式附说明）→ `EventsList`。`SmsDialog` 全局弹窗，优先级最高。
 
 ## 10. 测试计划
 
@@ -559,33 +561,15 @@ build: web
 | `internal/webui` Broker | 网页胜出后**终端通道再赢一次**（回归：孤儿 Scanner 吞码）；终端通道胜出；近同时双通道提交只有一个 claim 成功——网页胜则该 POST 202 且终端行被忽略（ErrNoPending）；终端胜则网页 POST 409；gen 不匹配的跨代提交 409；布防后快照 `sms_gen` 等于 Broker 当前代、拆除后归 0；gen 回绕跳过 0（MaxUint64 用例）；取消持锁后到达的 claim 一律 409；ctx 取消与 claim 竞态：claim 在先则 Prompt 仍返回该码；无 pending 时提交/resend 409；resend 重校验必须真正命中第二道检查——先发起 Resend 并使其停在首次校验之后（持有该代 opMu），完成 claim，释放后断言返回 409 且 resend 闭包未被调用；resend 进行中 Prompt 不返回的鉴别性用例——resend 通过重校验后阻塞其闭包（占住该代 opMu），随后 claim 成功，断言 Prompt 在闭包释放前不返回、释放后返回该 code；会话过期的 resend 结束旧 Prompt 并允许新代布防，且并发 claim 已胜出时仍由已知过期结果覆盖验证码 |
 | `internal/webui` HTTP | status 快照字段与凭据红线（响应体不含 `sid`/`csrf`/ticket）；快照事件对象**精确**只含 `ts`/`kind`/`message`；Host 不符 403；跨源 Origin POST 403；非 JSON POST 403；全部响应含 `frame-ancestors` 与 `X-Frame-Options`；`/api/events` 为 `text/event-stream` 且首帧完整快照；sms 提交 202/400/409；resend 202/409 之外必须验证类型化错误映射——假 resend 闭包返回 `*sdpc.APIError{Code:75500401}` 时 429、会话过期时 202 `{"restarting":true}`、返回其他错误时 500（§5.1/§7.2 跨包契约）；relogin：无 acquire 202 且状态转 connecting，acquire 进行中 409，且 202 后确实发生新登录；trust-devices 503（无会话）/409（browser 绑定）/200（假 sdpc 服务器）；Hub 消费：配置覆盖值与 clientResource 值各断言一次快照 gateways/dns；`login_failed`→`restore_success` 后 `last_error` 为 null |
 | `cmd/geektrust` | web listen 与启用的 inbound 监听冲突时 `webActive=false` 走降级路径（辅助函数单测），无冲突时正常装配 |
-| 构建 | 仅含 `.gitkeep` 的 dist 下 `go build ./cmd/geektrust` 成功（`go test ./...` 隐含覆盖 embed）；commit 4 必须通过 `npm --prefix web ci && npm --prefix web run build`（含 tsc） |
+| 构建 | 仅含 `.gitkeep` 的 dist 下 `go build ./cmd/geektrust` 成功（`go test ./...` 隐含覆盖 embed）；前端必须通过 `npm --prefix web ci && npm --prefix web run build`（含 tsc） |
 
 前端不设单元测试（无既有 JS 测试设施）；以 `npm run build`（tsc + vite）与手动冒烟验证。
 
-## 11. 文档
-
-- `README.md`：快速开始加面板地址一行；新增"Web 面板"小节（功能、配置、SSH 转发示例 `ssh -L 8081:127.0.0.1:8081 user@host`、Node 20+ 构建要求）。
-- `docs/PLAN.md`：§8 配置节追加 `[web]`；组件清单加 `internal/webui` 一段。
-- `docs/TECHNICAL.md`：不涉及协议变更，不加内容。
-
-## 12. 提交计划
-
-每个提交独立可编译、可通过 `go test ./...`：
-
-1. `feat: add web panel configuration` — config（含 `PrepareInitialConfig` 走 applyDefaults）+ init 模板 + 测试。
-2. `feat: add session events and SMS handler hooks` — `SessionInfo`/`Event`/dispatcher/`SetSMSHandler`/`ActiveSDPC`/`InvalidateIfCurrent`（`CredentialProvider` 接口迁移：消费者与 fake 一并从 `Invalidate` 切到 `InvalidateIfCurrent`；CheckLoop 与隧道拒绝路径改用条件失效化）/`TryForceRelogin` + 脱敏 + 测试。
-3. `feat: add webui server and REST API` — internal/webui（Hub/Broker/Server/占位 dist）+ cmdRun 接线 + 测试。
-4. `feat: add React web panel frontend` — web/ 源码（含 package-lock.json）+ Makefile + .gitignore；必须通过 `npm --prefix web ci && npm --prefix web run build`。
-5. `docs: document web panel` — README + PLAN + 本文件（docs/WEBUI.md）。
-
-提交前必须：本地审查 → reviewer 子代理审查 → 修复 → 复审通过 → 冻结后提交（沿用本次会话既定流程）。
-
-## 13. 验收标准
+## 11. 验收标准
 
 - `geektrust run`（web 默认开）日志打印面板地址；浏览器打开可见状态卡片。
 - 新设备首次 `run`：面板自动弹出短信输入；网页提交验证码后登录成功；之后再次需要短信时终端输入同样可用（无吞码）。
-- `enabled=false`：无任何监听，行为与现状完全一致。
+- `enabled=false`：不启动面板监听，短信只能在终端输入。
 - 非回环 listen：配置加载直接报错。
 - 面板可查看用户信息、授信终端列表，并完成绑定/取消授信/注销/重新登录；relogin 在登录进行中返回 409，成功后确实触发新登录。
 - 响应携带 `frame-ancestors 'none'` 与 `X-Frame-Options: DENY`；`/api/events` 为 `text/event-stream`；错误文本不含 ticket/sid。

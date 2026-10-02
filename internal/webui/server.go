@@ -29,8 +29,8 @@ const placeholderPage = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>geekTrust 面板</title></head>
 <body style="font-family:system-ui;max-width:640px;margin:4em auto;line-height:1.6">
 <h1>geekTrust Web 面板</h1>
-<p>前端资源尚未构建。请在仓库根目录执行 <code>make web</code>（需要 Node 20+），然后重新构建 geekTrust。</p>
-<p>REST API 不受影响：<code>GET /api/status</code> 可直接使用。</p>
+<p>前端资源尚未构建。请安装 Node 20+，在仓库根目录执行 <code>make build</code> 重新构建 geekTrust。</p>
+<p>VPN 和本地代理不受影响，可照常使用。</p>
 </body></html>
 `
 

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchTrustDevices, post, errorText } from "../api";
+import type { FriendlyError } from "../errors";
 import type { Snapshot, TrustDeviceEntry, TrustDeviceList } from "../types";
+import { ErrorText } from "./ErrorText";
 
 function deviceLabel(d: TrustDeviceEntry): string {
   const fallback = [d.os, d.osVersion].filter(Boolean).join(" ").trim();
@@ -8,12 +10,13 @@ function deviceLabel(d: TrustDeviceEntry): string {
 }
 
 const LIST_ERRORS: Record<number, string> = {
-  503: "会话未就绪,请稍后重试",
+  503: "会话未就绪，请稍后重试",
+  409: "browser 模式不能绑定授信终端，请把 client_type 改为 client 并重启 geektrust",
 };
 
 export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: boolean }) {
   const [list, setList] = useState<TrustDeviceList | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Which mutation is in flight, so the button that was clicked is the one
@@ -108,7 +111,7 @@ export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: b
             disabled={!canAct || selfTrusted || !isClient}
             title={
               !isClient
-                ? "browser 模式下服务端不允许绑定授信终端"
+                ? "browser 模式不能绑定授信终端"
                 : selfTrusted
                   ? "当前设备已在授信列表中"
                   : undefined
@@ -120,21 +123,21 @@ export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: b
       </div>
       {list && (
         <p className="muted">
-          服务端授信策略:{list.trustDeviceConfig.enable ? "已启用" : "未启用"};本机
-          {selfTrusted ? "已" : "未"}在授信列表。
+          服务端授信策略：{list.trustDeviceConfig.enable ? "已启用" : "未启用"}；当前设备
+          {selfTrusted ? "已" : "未"}授信。
         </p>
       )}
       {!isClient && (
         <p className="muted small">
-          当前为 browser 模式:可以查看、取消授信和注销设备,但不能绑定本机。把配置里的{" "}
-          <code>client_type</code> 改为 <code>client</code> 后重新登录即可绑定,后续登录可免短信。
+          当前为 browser 模式：可以查看、取消授信和注销设备，但不能绑定当前设备。把配置中的{" "}
+          <code>client_type</code> 改为 <code>client</code> 并重启 geektrust 后才能绑定。
         </p>
       )}
-      {error && <p className="error-text">{error}</p>}
+      {error && <ErrorText error={error} />}
       {notice && <p className="ok-text">{notice}</p>}
       {list ? (
         devices.length === 0 ? (
-          <p className="muted">暂无授信终端。绑定当前设备后,后续登录可免短信验证。</p>
+          <p className="muted">暂无授信终端。绑定当前设备后，后续登录通常不再需要短信验证。</p>
         ) : (
           <>
             <div className="table-wrap">
@@ -173,9 +176,9 @@ export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: b
                         <button
                           className="link danger"
                           disabled={!canAct || d.id === list.selfId}
-                          title={d.id === list.selfId ? "不能注销当前设备自身的会话" : undefined}
+                          title={d.id === list.selfId ? "不能注销当前设备" : undefined}
                           onClick={() => {
-                            if (window.confirm(`确定注销设备「${deviceLabel(d)}」?其会话将立即失效。`)) {
+                            if (window.confirm(`确定注销设备「${deviceLabel(d)}」？该设备的会话将立即失效。`)) {
                               void run(
                                 () => post("/api/trust-devices/logout", { id: d.id }),
                                 "已注销设备",
@@ -197,7 +200,7 @@ export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: b
                 className="secondary"
                 disabled={!canAct || selected.size === 0}
                 onClick={() => {
-                  if (window.confirm(`确定取消 ${selected.size} 台设备的授信?下次登录这些设备可能需要短信验证。`)) {
+                  if (window.confirm(`确定取消 ${selected.size} 台设备的授信？这些设备下次登录可能需要短信验证。`)) {
                     void run(
                       () => post("/api/trust-devices/unbind", { ids: [...selected] }),
                       "已取消授信",
@@ -206,7 +209,7 @@ export function TrustDevices({ snap, connected }: { snap: Snapshot; connected: b
                   }
                 }}
               >
-                {pending === "unbind" ? "处理中…" : `取消授信(${selected.size})`}
+                {pending === "unbind" ? "处理中…" : `取消授信（${selected.size}）`}
               </button>
             </div>
           </>
