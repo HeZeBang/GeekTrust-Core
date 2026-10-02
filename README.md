@@ -254,11 +254,5 @@ git push origin v0.1.0
 
 ## 支持的学校
 
-- **上海科技大学**：主要支持对象，本文档的默认配置、`init` 和 passkey 绑定都针对它。
-- **华东师范大学**：仅实现了 passkey 登录（能识别其 keystore 格式），命令行的完整连接流程未经验证。已知限制：
-  - 本仓库不提供生成华东师大 keystore 的方法，`init --bind-passkey` 只能绑定上海科大账号。
-  - `init` 总是写入上海科大的 `base_url`，需要手工改为学校的 aTrust 地址。
-  - 上海科大专有的兜底逻辑（默认 `app_id`、内置网关线路、证书主机名）不会生效；服务端必须下发网关线路和明确的授权规则。
-  - 网关证书只按系统 CA 校验。如果网关使用私有 CA 证书，命令行会连接失败。`client` 包的 `GatewayTrustStore` 可处理这种情况，但命令行没有启用。
-
-其他 aTrust 控制器未经测试。
+- 上海科技大学
+- 华东师范大学：需要根据学校的情况进行配置，Passkey 可通过 [ecnu-sso-passkey](https://github.com/nanakusa-electronics/ecnu-sso-passkey) 获取。
