@@ -1,6 +1,6 @@
 # geekTrust
 
-geekTrust 是 aTrust VPN 的独立纯用户态客户端。它不创建虚拟网卡、不修改系统路由，也不需要 root。VPN 内的 TCP 和 UDP 流量通过本地 SOCKS5、HTTP CONNECT 代理提供给其他程序。
+geekTrust 是 aTrust VPN 的纯用户态客户端。它不创建虚拟网卡、不修改系统路由，也不需要 root，而是通过本地 SOCKS5 和 HTTP 代理把 VPN 内的 TCP、UDP 流量提供给其他程序。
 
 协议细节见 [`docs/TECHNICAL.md`](docs/TECHNICAL.md)，工程设计见 [`docs/PLAN.md`](docs/PLAN.md)。
 
@@ -10,31 +10,29 @@ geekTrust 是 aTrust VPN 的独立纯用户态客户端。它不创建虚拟网�
 应用程序 -> SOCKS5 / HTTP -> geekTrust -> TCP 流式通道 / UDP L3 隧道 -> aTrust 网关
 ```
 
-- 使用 IDS passkey 完成免密码登录。
-- client 模式会在首次短信验证后尝试绑定授信终端。绑定成功后，会话失效时可静默重登，通常不再要求短信。
-- TCP 使用网关原生流式代理，避免把下载流量封装成大量 L3 小包；流式通道不可用或不兼容时自动回退到 L3。
-- UDP 和 TCP 兼容回退由 gVisor 用户态 IPv4 栈处理。
-- 自动恢复会话；多条网关线路采用错峰 TLS 竞速，并直接复用首个成功连接，避免探测后重复建连。
+- 使用 IDS passkey 免密码登录。
+- client 模式在首次短信验证后会尝试绑定授信终端。绑定成功后，会话失效时可静默重登，通常不再要求短信。
+- TCP 优先使用网关原生流式通道；不可用或不兼容时自动回退到 L3 隧道。
+- UDP 和 TCP 回退流量由 gVisor 用户态 IPv4 栈处理。
+- 会话自动恢复；有多条网关线路时错峰竞速，直接使用最先完成 TLS 握手的连接。
 
 ## 快速开始
 
-需要 Go 1.24+ 和 [uv](https://docs.astral.sh/uv/)。
+从源码构建需要 Go 1.24+：
 
 ```sh
 go build -o geektrust ./cmd/geektrust
 ```
 
-上述构建的 Web 面板是占位页。完整构建（面板前端 + 二进制）还需要 Node 20+，然后执行：
+这样构建的二进制可以正常使用，但 Web 面板只显示构建提示页。需要完整面板时，安装 Node 20+ 后执行：
 
 ```sh
 make build
 ```
 
-`run` 启动后打开 Web 面板：<http://127.0.0.1:8081>（可在此完成短信验证、查看连接状态与用户信息、管理授信终端）。
+### 新用户：初始化并绑定 passkey
 
-### 新用户：完成初始化和 passkey 绑定
-
-macOS 可通过 Homebrew 安装 uv：
+`--bind-passkey` 需要 [uv](https://docs.astral.sh/uv/)。geekTrust 会优先使用与自身同目录的 `uvx`（文件名带 `_with-uv` 的发布包已附带），找不到时再从 `PATH` 中查找。macOS 可用 Homebrew 安装：
 
 ```sh
 brew install uv
@@ -46,28 +44,24 @@ brew install uv
 ./geektrust -config config.toml init --bind-passkey
 ```
 
-`--bind-passkey` 通过 `uvx --from git+... --with selenium` 在隔离环境中运行
-`shanghaitech-ids-passkey`，不会把 passkey 工具或其 Python 依赖安装到全局环境。
-
 该命令会：
 
-1. 使用系统安全随机源生成独立的 128 位 `device_id`。
-2. 通过 uvx 打开浏览器并生成 keystore。
-3. 写入默认使用 `client_type = "client"` 的配置。
-4. 启用本地 SOCKS5 和 HTTP 代理。
+1. 用系统安全随机源生成 128 位 `device_id`。
+2. keystore 不存在时，通过 `uvx` 在隔离环境中运行 [shanghaitech-ids-passkey](https://github.com/vvbbnn00/shanghaitech-ids-passkey)，打开浏览器完成绑定并生成 keystore。不会向全局环境安装任何 Python 包。
+3. 写入 `client_type = "client"` 的配置，启用本地 SOCKS5、HTTP 代理和 Web 面板。
 
-初始化默认拒绝覆盖已有配置。只有明确需要重建配置时才使用 `--force`。
+配置文件已存在时，init 会拒绝覆盖。确实需要重建时再加 `--force`。
 
 ### 已有 keystore
 
-如果已经完成 passkey 绑定，可直接复用：
+已经完成 passkey 绑定的话，直接指定 keystore：
 
 ```sh
 ./geektrust -config config.toml init \
   --keystore /path/to/ids-passkey.keystore
 ```
 
-`device_id` 默认仍由 init 随机生成。也可以提供自己生成的 32 位大写十六进制值：
+`device_id` 默认由 init 随机生成。也可以用 `--device-id` 指定自己生成的 32 位大写十六进制值：
 
 ```sh
 ./geektrust -config config.toml init \
@@ -75,15 +69,15 @@ brew install uv
   --device-id 0123456789ABCDEF0123456789ABCDEF
 ```
 
-不要复用文档中的示例值。每个安装应使用不同的 `device_id`，首次登录后也不要修改它。
+不要照抄示例值。每个安装都应使用不同的 `device_id`，首次登录后也不要再修改。
 
-### 首次登录
+### 首次登录与启动
 
 ```sh
 ./geektrust -config config.toml login
 ```
 
-新设备首次登录可能需要短信验证。验证成功后，client 模式会尝试把当前设备绑定为授信终端。绑定成功后，即使会话失效，程序也可以使用 passkey 静默重登；同一 `device_id` 通常不会再次触发短信。若自动绑定失败，可在登录后运行 `trust-device bind`。
+新设备首次登录可能需要短信验证。验证成功后，client 模式会尝试把当前设备绑定为授信终端；绑定成功后，同一 `device_id` 通常不会再触发短信。自动绑定失败时，可以手动运行 `trust-device bind`。
 
 启动代理：
 
@@ -91,9 +85,11 @@ brew install uv
 ./geektrust -config config.toml run
 ```
 
+`run` 启动后可打开 Web 面板 <http://127.0.0.1:8081>，在其中完成短信验证、查看连接状态和管理授信终端。
+
 ## 配置
 
-推荐使用 `geektrust init` 生成配置，而不是复制固定模板。生成结果大致如下：
+推荐用 `geektrust init` 生成配置。生成结果如下（另含一行注释）：
 
 ```toml
 keystore = "./ids-passkey.keystore"
@@ -113,26 +109,32 @@ listen = "127.0.0.1:1080"
 [inbound.http]
 enabled = true
 listen = "127.0.0.1:8080"
+
+[web]
+enabled = true
+listen = "127.0.0.1:8081"
 ```
 
-关键配置：
+手工编写配置可参考 [`config.example.toml`](config.example.toml)。
 
-- `device_id`：设备的稳定身份。init 会安全随机生成。修改后会被服务器视为新设备，需要重新验证和绑定。
-- `client_type`：推荐使用 `client`。首次短信验证后会尝试绑定授信终端；绑定成功后，后续登录通常不再要求短信。
-- `keystore`：passkey 私钥文件。不要泄露或提交到版本库。
-- `state_file`：加密会话状态。密钥保存在同目录的 `<state_file>.key`，两个文件权限均为 0600。
+主要配置项：
+
+- `device_id`：设备的稳定身份。修改后服务器会把它视为新设备，需要重新验证和绑定。
+- `client_type`：推荐 `client`。手写配置省略该项时默认为 `browser`。
+- `keystore`：passkey 私钥文件。不要泄露，也不要提交到版本库。
+- `state_file`：加密的会话状态。密钥保存在同目录的 `<state_file>.key`，两个文件都只允许当前用户读写。
 - `gateways`：留空时使用服务端下发的线路。
-- `dns`：通常留空。只有需要覆盖服务端下发的隧道 DNS 时才设置。
+- `dns`：通常留空，仅在需要覆盖服务端下发的隧道 DNS 时设置。
 
-SOCKS5 和 HTTP 代理没有身份认证，只应监听 `127.0.0.1`。不要把监听地址改为 `0.0.0.0`，否则同一网络中的其他设备可能使用你的 VPN 会话。
+SOCKS5 和 HTTP 代理没有身份认证，只应监听 `127.0.0.1`。如果改成 `0.0.0.0`，同一网络中的其他设备也能使用你的 VPN 会话。
 
 ### browser 兼容模式
 
-只有在目标控制器不支持 client 模式时，才把 `client_type` 改为 `browser`。browser 模式不能绑定授信终端，因此会话彻底失效后可能再次要求短信。默认初始化流程不使用该模式。
+只有在控制器不支持 client 模式时，才把 `client_type` 设为 `browser`。browser 模式不能绑定授信终端，会话彻底失效后可能再次要求短信。
 
 ## Web 面板
 
-`run` 期间默认启用本地面板（只监听回环，无需认证）：
+`run` 期间默认启用本地面板，只监听回环地址，没有身份认证：
 
 ```toml
 [web]
@@ -142,44 +144,44 @@ listen = "127.0.0.1:8081"
 
 功能：
 
-- 实时连接状态（在线/连接中/需要短信验证/离线）与最近事件流。
-- 短信验证：状态变为需要短信时面板弹出输入框，网页和终端哪个先提交用哪个；支持重新发送。
-- 当前用户信息（账号、姓名、客户端 IP）、网关与隧道 DNS。
-- 授信终端管理：列表、绑定当前设备、取消授信、注销设备（仅 client 模式）。
-- 一键重新登录。
+- 实时连接状态（在线、连接中、需要短信验证、离线）和最近事件。
+- 短信验证：需要短信时自动弹出输入框，网页和终端都可以输入，以先提交的为准；支持重新发送。
+- 当前用户信息（账号、姓名、客户端 IP）、网关和隧道 DNS。
+- 授信终端：查看列表、取消授信、注销设备；绑定当前设备仅限 client 模式。
+- 重新登录。
 
 说明：
 
-- 面板只绑回环地址，配置校验会拒绝任何非回环 `listen`。需要远程访问时用 SSH 转发：`ssh -L 8081:127.0.0.1:8081 user@host`。
-- 面板是附属品：启动失败（如端口被占用）只记警告，不影响 VPN；`enabled = false` 时行为与无面板完全一致。
-- 前端源码在 `web/`（React + Vite），构建产物不入库；不构建前端时 `go build` 照常可用，面板显示构建提示页。
+- `listen` 必须是回环地址，且不能使用 80 端口，否则配置加载失败。需要远程访问时用 SSH 转发：`ssh -L 8081:127.0.0.1:8081 user@host`。
+- 面板启动失败（如端口被占用或与代理端口冲突）只会记录警告并跳过面板，不影响 VPN 和代理。
+- `enabled = false` 时不启动面板，短信只能在终端输入。
 
 ## 常用命令
 
 ```sh
-# 查看构建时写入的版本号
+# 查看版本号
 ./geektrust version
 
 # 登录或恢复会话
 ./geektrust -config config.toml login
 
-# 强制执行完整登录，不恢复已有会话
+# 跳过已保存的会话，强制完整登录
 ./geektrust -config config.toml login --fresh
 
-# 启动本地代理
+# 启动本地代理（不带命令时默认执行 run）
 ./geektrust -config config.toml run
 
-# 经隧道连接目标；443 端口会执行 TLS 握手
+# 经隧道连接目标，端口默认 443；443 端口会额外完成 TLS 握手
 ./geektrust -config config.toml dial library.shanghaitech.edu.cn
 
 # 查看授信终端
 ./geektrust -config config.toml trust-device list
 
-# 手动绑定当前设备
+# 手动绑定当前设备（仅 client 模式）
 ./geektrust -config config.toml trust-device bind
 
-# 取消授信或注销指定终端
-./geektrust -config config.toml trust-device unbind <id>
+# 取消授信（可一次指定多个 ID）或注销指定终端
+./geektrust -config config.toml trust-device unbind <id> [<id>...]
 ./geektrust -config config.toml trust-device logout <id>
 ```
 
@@ -192,73 +194,71 @@ curl -x http://127.0.0.1:8080 https://library.shanghaitech.edu.cn/qbsjk/list.htm
 
 ## UDP 支持
 
-SOCKS5 入口按 RFC 1928 支持 `UDP ASSOCIATE`。HTTP/1.1 入口按 RFC 9298 支持 CONNECT-UDP，UDP 载荷使用 RFC 9297 DATAGRAM Capsule，Context ID 为 0。当前 HTTP listener 不提供 HTTP/2 或 HTTP/3。
+- SOCKS5 入口支持 RFC 1928 `UDP ASSOCIATE`。
+- HTTP 入口支持 HTTP/1.1 上的 RFC 9298 CONNECT-UDP（RFC 9297 DATAGRAM Capsule，Context ID 为 0），不支持 HTTP/2 和 HTTP/3。
 
-两种入口都使用控制连接管理 UDP relay 的生命周期，并为每个目标执行独立的网关认证。
+两种入口的 UDP 关联都随对应的 TCP 控制连接结束。
 
 ## 路由与解析
 
-路由策略来自服务端下发的完整应用表，支持精确域名、域名后缀、精确 IP、CIDR、IP 区间和端口范围。精确规则优先于范围更大的规则。
+路由规则来自服务端下发的应用表，支持精确域名、域名后缀、精确 IP、CIDR、IP 区间和端口范围；范围越小的规则优先级越高。
 
-普通域名先使用公共和系统 DNS。没有可用 IPv4 结果时，程序通过 VPN 查询服务端下发的校内 DNS，以解析 split-horizon 内网域名。`dns` 配置可覆盖这些隧道 DNS。
+域名先用公共 DNS 和系统 DNS 解析。没有可用 IPv4 结果时，再通过 VPN 查询服务端下发的校内 DNS，以解析只在校内可见的域名。`dns` 配置可覆盖这些隧道 DNS。
 
-公共和隧道 DNS 使用以下回退规则：
+DNS 查询先用 UDP，失败或回复被截断时改用 TCP；持续失败的服务器会暂时跳过并改用备用服务器，恢复后自动重新使用。具体超时和冷却规则见 [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §12.5。
 
-- UDP 查询最多等待 1.5 秒。失败或回复截断时，改用同一服务器的 TCP，最多等待 3 秒；隧道 TCP 按自己的协议规则选择授权应用。
-- UDP 失败后，冷却期间优先使用 TCP。冷却时间从 30 秒逐次加倍，最长 5 分钟；到期后只放行一个 UDP 探测，其他并发请求继续使用 TCP。收到有效 UDP 回复后恢复正常。
-- UDP 和 TCP 都失败的服务器临时冷却，程序改试备用 DNS，到期后重新探测。NXDOMAIN 等有效回复不会被当作断线，调用方取消请求也不会计入失败。
-- 同一域名的并发查询共用一次请求，单个调用方取消不影响其他调用方。会话、DNS 列表、网关配置或授权策略变化后重置隧道 DNS 的健康状态；这些状态只保存在内存中。系统 DNS 阶段最多等待 2 秒。
-
-程序会拒绝把当前 VPN 网关再次送回隧道，避免 Clash TUN 等透明代理形成回环。
+程序会拒绝把当前 VPN 网关地址再送回隧道，避免与 Clash TUN 等透明代理形成回环。
 
 ## 限制
 
-- 代理数据面只支持 IPv4 目标。网关接入线路可以使用 IPv6。
-- 隧道 MTU 为 1400，UDP payload 上限为 1372 字节。需要 IP 分片的超大数据报会按相应代理协议的要求丢弃。
+- 代理只支持 IPv4 目标。连接网关的线路可以使用 IPv6。
+- 隧道 MTU 为 1400，UDP 载荷上限为 1372 字节，超出的数据报会被丢弃。
 
-## GitHub Actions
+## 发布构建
 
-GitHub Actions 会在 pull request 和手动运行时构建、测试发布构件；推送匹配
-`v*` 的 tag 时，通过相同验证后创建 GitHub Release。
+GitHub Actions 在 pull request 和手动触发时构建并测试发布包；推送 `v*` 标签时，验证通过后创建 GitHub Release。支持的平台：
 
-- Linux: amd64、arm64
-- macOS: amd64、arm64
-- Windows: amd64、arm64
+- Linux：amd64、arm64
+- macOS：amd64、arm64
+- Windows：amd64、arm64
 
-本地生成相同构件：
+在本地生成发布包：
 
 ```sh
 bash scripts/package-release.sh v0.1.0 dist
-# with uv
+# 附带 uv/uvx 的版本（需要 curl）
 bash scripts/package-release-uv.sh v0.1.0 dist
 ```
 
-发布版本使用 `vMAJOR.MINOR.PATCH` 格式，例如 `v0.1.0`。预发布版本可使用
-`v0.1.0-rc.1`。发布脚本会把这个完整版本号同时写入压缩包名称和二进制，解压后可用
-`geektrust version` 或 `geektrust --version` 查看。
+输出目录必须为空。每个压缩包包含内置完整 Web 面板的二进制、`config.example.toml` 和 README，输出目录中另生成 `SHA256SUMS`。GitHub Release 只发布不含 uv 的包。
 
-从准备发布的提交创建并推送标签：
+版本号使用 `vMAJOR.MINOR.PATCH` 格式（如 `v0.1.0`），预发布版本可用 `v0.1.0-rc.1`。版本号会写入压缩包名和二进制，可用 `geektrust version` 或 `geektrust --version` 查看。
+
+在要发布的提交上创建并推送标签：
 
 ```sh
 git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
-输出目录必须为空。每个压缩包包含完整 Web 面板、`config.example.toml`
-和 README，同时生成 `SHA256SUMS`。
-
 ## 鸣谢
 
-- [shanghaitech-ids-passkey](https://github.com/vvbbnn00/shanghaitech-ids-passkey)：IDS passkey 登录和浏览器绑定流程。geekTrust 的 `internal/idsauth` 与其 keystore 格式兼容。
+- [shanghaitech-ids-passkey](https://github.com/vvbbnn00/shanghaitech-ids-passkey)：IDS passkey 登录和浏览器绑定流程。`internal/idsauth` 与其 keystore 格式兼容。
 - [zju-connect](https://github.com/Mythologyli/zju-connect)：aTrust 隧道帧处理和线路选择参考。
 - [metacubex/gvisor](https://github.com/metacubex/gvisor)：用户态 TCP/IP 栈。
 - [Xray-core](https://github.com/XTLS/Xray-core)：代理协议实现参考。
 
-## 许可与声明
+## 声明
 
-本项目仅供学习与合法使用。请遵守学校相关政策和法律法规。
+本项目仅供学习和合法使用。请遵守学校相关政策和法律法规。
 
-## 目前支持的平台
+## 支持的学校
 
-- 上海科技大学
-- 华东师范大学
+- **上海科技大学**：主要支持对象，本文档的默认配置、`init` 和 passkey 绑定都针对它。
+- **华东师范大学**：仅实现了 passkey 登录（能识别其 keystore 格式），命令行的完整连接流程未经验证。已知限制：
+  - 本仓库不提供生成华东师大 keystore 的方法，`init --bind-passkey` 只能绑定上海科大账号。
+  - `init` 总是写入上海科大的 `base_url`，需要手工改为学校的 aTrust 地址。
+  - 上海科大专有的兜底逻辑（默认 `app_id`、内置网关线路、证书主机名）不会生效；服务端必须下发网关线路和明确的授权规则。
+  - 网关证书只按系统 CA 校验。如果网关使用私有 CA 证书，命令行会连接失败。`client` 包的 `GatewayTrustStore` 可处理这种情况，但命令行没有启用。
+
+其他 aTrust 控制器未经测试。

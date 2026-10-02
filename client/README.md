@@ -21,7 +21,8 @@ if err != nil { return err }
 defer conn.Close()
 ```
 
-- `DeviceID` 是持久保存的 32 位大写十六进制标识，可用 `NewDeviceID` 生成。
+- `ControllerURL` 必须是 HTTPS origin（不带路径、查询参数）。`DeviceID` 是持久保存的 32 位大写十六进制标识，可用 `NewDeviceID` 生成。
+- `ClientMode` 默认为 false，即 browser 模式；设为 true 后，首次短信验证成功时会尝试绑定授信终端。
 - `BlobStore` 收到的是凭据或会话的明文字节，调用方负责保密、原子写入和持久化。同一 passkey 使用同一认证器串行更新计数器；保存失败不会提交断言。
 - 认证遵循调用方的 context，允许等待短信输入；网络连接和解析设有超时。连接建立后，用 `SetDeadline` 控制读写。`Close` 会取消操作并关闭自有连接。
 - TCP 优先遵循服务端 L3 偏好，否则先尝试流式 TCP；协议不兼容或连接建立失败时可退回 L3，明确的目标拒绝和取消不会触发回退。

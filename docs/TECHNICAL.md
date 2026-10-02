@@ -1,8 +1,8 @@
 # geekTrust 技术规格文档(aTrust SDP 2.0 连接协议)
 
-> 本文档客观、完整地描述与上海科技大学 aTrust VPN(Sangfor aTrust SDP 2.0,`https://vpn.shanghaitech.edu.cn/`)建立连接、并通过其代理网关转发 TCP 流量所需的全部协议细节。
-> 文中所有请求/响应结构、字段、状态码均经过线上实测验证,并与本仓库 `src/` 下的 Python 参考实现一一对应。
-> 配套设计与实施计划见 [`PLAN.md`](./PLAN.md)。`ANALYSIS.md`、`HANDOFF.md`、`PROTOCOL.md` 为早期调研笔记(归档,仅供内部参考)。
+> 本文档描述与上海科技大学 aTrust VPN(Sangfor aTrust SDP 2.0,`https://vpn.shanghaitech.edu.cn/`)建立连接,并通过其网关转发 TCP/UDP 流量所需的协议细节。
+> 文中请求/响应结构、字段和状态码均经过线上实测。
+> 工程设计见 [`PLAN.md`](./PLAN.md)。
 
 ---
 
@@ -20,7 +20,6 @@
 10. [密码学与签名参考](#10-密码学与签名参考)
 11. [状态码与错误码总表](#11-状态码与错误码总表)
 12. [运行与鲁棒性要点](#12-运行与鲁棒性要点)
-13. [参考实现索引(Python)](#13-参考实现索引python)
 
 ---
 
@@ -112,18 +111,17 @@ IDS passkey 登录 → CASTGC
 
 > 本节描述**浏览器路径**(`clientType=SDPBrowserClient`)。`authConfig` 是第一步,提供后续所需的
 > `csrfToken`(作为 `x-csrf-token` 头)及 `challenge`/`devicePubKeyMod`/`rsaCert`。
-> 注:参考脚本 `tmp/clean_login.py` 走**桌面路径**(`clientType=SDPClient` 并计算 signKey),二者均可用;
-> geekTrust 采用浏览器路径以规避接口签名。`tmp/clean_login.py`、`tmp/vpn_sms5.py` 在 authCheck/sendsms 处停止,
-> 未调用 ticketExchange/sessionIdExchange/onlineInfo——§3.7/§3.8 依据线上实测,而非这两个脚本。
+> 桌面路径(`clientType=SDPClient` 并计算 signKey)同样可用;geekTrust 采用浏览器路径以规避接口签名,
+> client 模式仅在 reportEnv 使用 `SDPClient`(见 §3.9)。
 
 ### 3.1 IDS 统一身份认证(passkey 免密)
 
-通过 `third_party/shanghaitech-ids-passkey`(WebAuthn passkey)完成 IDS 登录,无需用户名密码:
+通过 [shanghaitech-ids-passkey](https://github.com/vvbbnn00/shanghaitech-ids-passkey) 绑定的 WebAuthn passkey 完成 IDS 登录,无需用户名密码:
 
-1. `IDSClient(keystore).login()`:使用 keystore 中的 passkey 私钥对 IDS 挑战签名,获得 IDS 会话 cookie(含 `CASTGC`)。
-2. 登录成功后 `keystore.dump()` 持久化(`sign_count` 会递增,必须回写)。
+1. 使用 keystore 中的 passkey 私钥对 IDS 挑战签名,获得 IDS 会话 cookie(含 `CASTGC`)。
+2. 登录后持久化 keystore(`sign_count` 会递增,必须回写)。
 
-> passkey 的**绑定**需浏览器交互(见该库 `bind` 命令);geekTrust 的 Go 实现只需复用已绑定的 keystore 完成登录(见 PLAN.md §4.3)。
+> passkey 的**绑定**需浏览器交互(该工具的 `bind` 命令,或 `geektrust init --bind-passkey`);geekTrust 的 Go 实现只复用已绑定的 keystore 完成登录(见 PLAN.md §4.3)。
 
 ### 3.2 authConfig — 获取公共配置
 
@@ -263,7 +261,7 @@ x-csrf-token: <csrfToken>
 
 **前置条件:会话必须是「客户端模式」。** 判定依据是 `reportEnv` 的 `clientType` 查询参数:
 
-- `clientType=SDPBrowserClient`(geekTrust 默认)→ 纯 web 会话;此时调用绑定接口返回
+- `clientType=SDPBrowserClient`(`client_type = "browser"`,也是省略该项时的默认值)→ 纯 web 会话;此时调用绑定接口返回
   `75500000 当前未安装客户端或使用纯web模式登录,无法添加授信终端`。
 - `clientType=SDPClient`(仅 reportEnv 此参数,其余接口仍用浏览器参数,均无需签名)
   → 客户端模式会话,可绑定。geekTrust 以 `client_type = "client"` 启用。
@@ -286,7 +284,7 @@ POST /passport/v1/security/logoutDevice       {"id":"<id>"}
   设备条目字段:`id`、`deviceName`、`deviceType`(`browser`/桌面平台)、`os`、`osVersion`、
   `lastLoginIp`、`lastLoginAddress`、`networkZoneList`、`onlineStatus`(bool)。
   `selfId` 为当前会话设备 id,可据此判断本机是否已授信。
-- 绑定在短信验证成功、会话建立(onlineInfo 在线)之后调用;geekTrust 在 client 模式登录时自动执行。
+- 绑定在短信验证成功、会话建立(onlineInfo 在线)之后调用;geekTrust 在 client 模式下完成短信验证后自动执行。
 
 ---
 
@@ -352,10 +350,9 @@ IPv4 并查 IP 规则,最后才用后缀通配符。IP 规则先选精确地址;
 区间按覆盖的地址数量比较,范围越小越优先。例如 10/8 区间应覆盖 `/0`
 兜底,而 `/16` 又比 10/8 更具体。同级规则保持 `appList` 顺序。
 
-公网 DNS 和系统 DNS 均没有可用 IPv4 时,Go 实现通过隧道内的 UDP 流查询
-`sdpPolicy.clientOption.dnsOption/dnsOptionV2` 下发的校内 DNS。该路径用于
-`netinfo.shanghaitech.edu.cn` 等 split-horizon 域名,不代表代理入口支持
-SOCKS5 UDP ASSOCIATE。配置中的 `dns` 可覆盖上游下发值。
+公网 DNS 和系统 DNS 均没有可用 IPv4 时,Go 实现通过隧道查询
+`sdpPolicy.clientOption.dnsOption/dnsOptionV2` 下发的校内 DNS(UDP 优先,必要时改用 TCP,见 §12.5)。
+该路径用于 `netinfo.shanghaitech.edu.cn` 等 split-horizon 域名。配置中的 `dns` 可覆盖上游下发值。
 
 后缀规则兜底时,authRequestIP 还要携带原始域名(见 §6.2)。网关会用
 自己的 DNS 结果核对 `destAddr`;若公网 DNS 返回了不同的 CDN 地址,
@@ -366,7 +363,7 @@ SOCKS5 UDP ASSOCIATE。配置中的 `dns` 可覆盖上游下发值。
 
 网关接入地址来自 `nodeGroup.addresses`(或 spaConfig 的 `proxyAddresses`),均为 `441/TCP-TLS`:
 `119.78.254.241:441`、`59.78.171.241:441`、`10.13.90.147:441`(内网)、`[2001:da8:801d:d5a:9020:100:d:5a93]:441`。
-实现应对多条线路并发完成 TLS 握手后按延迟择优,失败时切换(见 §12)。只做 TCP connect
+实现对多条线路错峰发起 TLS 握手,直接使用首个成功的连接,失败时切换(见 §12.4)。只做 TCP connect
 会把本机透明代理形成的回环误判为可用网关。
 
 ---
@@ -428,8 +425,8 @@ SOCKS5 UDP ASSOCIATE。配置中的 `dns` 可覆盖上游下发值。
 ### 5.4 心跳
 
 - 客户端周期发送 `05 15 00 00`,服务器回 `05 95 00 00`。
-- 参考实现每 20 秒发送一次心跳(只发不收);**隧道死亡由读循环的连接断开/读失败检测触发**(`reader` 循环读出错即判定死亡并关闭所有连接)。
-- 「连续 N 次心跳无响应判死」是一种可选的更主动的保活策略,建议在 Go 实现中采用(见 §12)。
+- 读循环出错即判定隧道死亡,并关闭其上所有连接。
+- geekTrust 每 20 秒发送一次心跳,并在连续 3 个心跳周期(60 秒)没有收到任何帧时主动判定隧道死亡、触发重连。
 
 ### 5.5 TCP 流式通道(主路径)
 
@@ -472,7 +469,7 @@ L3 路径中的每条 UDP 流和兼容回退 TCP 流,先做一次每连接认证
 
 ### 6.2 authRequestIP JSON(字段顺序与结构,实测可用)
 
-字段须按以下顺序序列化(Go `encoding/json` 结构体序;参考实现用 `OrderedDict` 保证顺序):
+字段须按以下顺序序列化(Go 实现依赖 `encoding/json` 的结构体字段顺序):
 
 ```json
 {
@@ -550,7 +547,7 @@ L3 路径中的每条 UDP 流和兼容回退 TCP 流,先做一次每连接认证
 05 93 <status:1B> <BE16 len> <authResponseIP JSON>
 ```
 
-> `status` 为 1 字节状态位(实测观察值为 `0x82`;参考实现仅读走该字节、不校验其值)。
+> `status` 为 1 字节状态位(实测观察值为 `0x82`);geekTrust 读出该字节但不依据它判断成败。
 
 ```json
 {
@@ -583,7 +580,7 @@ L3 路径中的每条 UDP 流和兼容回退 TCP 流,先做一次每连接认证
 
 - `connectToken` 以其 **ASCII 字符串字节**发送(32 字节,tokenLen=32)。
 - 每个 IPv4 包前缀 2 字节大端长度。
-- 一次可携带多个包(`pktCount`),参考实现每次发 1 个。
+- 一次可携带多个包(`pktCount`);geekTrust 会把同一 token 的连续包合并进一帧。
 
 ### 7.2 下行数据帧(0x94)— 两种布局
 
@@ -593,7 +590,7 @@ L3 路径中的每条 UDP 流和兼容回退 TCP 流,先做一次每连接认证
 - **token-mode**:`05 94 <tokenLen=32> <token 32B> 00 00 <count:1B> [ <BE16 plen> <IPv4 包> ]×N`。
   此时首 2 字节为 `0x20 XX`(tokenLen=32 → 高字节 0x20),其值 `0x20XX ≥ 8192 > 4096`,据此与 len-mode 区分。
 
-**关键:必须按 IP 头 total-length(`ip[2:4]`)逐个拆分帧内拼接的多个 IPv4 包**(参考实现 `_split_ip_packets`)。
+**关键:必须按 IP 头 total-length(`ip[2:4]`)逐个拆分帧内拼接的多个 IPv4 包**。
 若把整段载荷当成单个 IP 包、用帧长计算 TCP 载荷,会把后续 IP 包误当作前一个包的载荷,导致 TCP 流损坏
 (表现为 TLS 记录在合并段边界处错位)。
 
@@ -613,55 +610,24 @@ TCP 或 UDP endpoint。隧道 MTU 为 1400;UDP 入口把 payload 限制为
 ### 7.4 下行分发
 
 Go reader 按 §7.2 拆出完整 IPv4 包后,通过 protocol 和 VIP 目的端口找到
-对应 gVisor endpoint;Python 参考实现只包含 TCP 端点。
+对应 gVisor endpoint。
 
 ---
 
 ## 8. 用户态 TCP/UDP 端点
 
-L3 数据面承载完整 IPv4/TCP 或 IPv4/UDP 包。Python 参考实现 `TCPConn` 只覆盖
-下述最小 TCP 行为;geekTrust 的 Go 实现使用 gVisor IPv4/TCP/UDP 栈,
-额外具备完整 TCP 状态机和保持数据报边界的 connected UDP endpoint。
+L3 数据面承载完整 IPv4/TCP 或 IPv4/UDP 包。geekTrust 使用 gVisor IPv4/TCP/UDP 栈:
 
-### 8.1 连接建立(三次握手)
-
-1. 选取初始序号 ISN(随机),`my_seq = ISN`。
-2. 发送 SYN(`flags=0x02`),`my_seq += 1`。
-3. 等待 SYN-ACK:收到带 SYN 标志的段(`flags & 0x02` 且当前 `peer_seq == 0`)时,`peer_seq = seg.seq + 1`。
-4. 发送 ACK(`flags=0x10`)。握手完成。
-5. 超时(参考 8 秒)未收到 SYN-ACK 判定失败。
-
-### 8.2 数据发送
-
-- 应用字节流按 MSS(参考 1400)分段,逐段发 PSH+ACK(`flags=0x18`),每段 `my_seq += len(chunk)`。
-
-### 8.3 数据接收与 TCP 重组
-
-收到对端 TCP 段后按序号重组(参考实现 `on_ip_packet`):
-
-- `seq == peer_seq`:有序,追加载荷,`peer_seq += len`;随后循环取出乱序缓存 `_ooo` 中与新 `peer_seq` 衔接的段。
-- `seq > peer_seq`:未来段,暂存 `_ooo[seq]`。
-- `seq < peer_seq`:重传/重叠段;`overlap = peer_seq - seq`,仅追加重叠之后的新数据 `payload[overlap:]`(完全重复则跳过)。
-- 每次收到带载荷的段回复 ACK(`flags=0x10`)。
-- FIN(`flags&0x01`):更新 `peer_seq`,回 ACK,标记关闭。
-- RST(`flags&0x04`):标记关闭。
-
-### 8.4 关闭
-
-发送 FIN+ACK(`flags=0x11`),`my_seq += 1`,标记关闭并注销 conntrack。
-
-### 8.5 用户态 UDP endpoint
-
-Go 实现为每个 UDP 目标建立 connected gVisor UDP endpoint。入口写入的每次
-`Write` 对应一个 UDP 数据报,下行每次 `Read` 也保留数据报边界。隧道断开会
-销毁 endpoint;下一次入口写入按同一目标重新解析、认证并建立 flow。
+- TCP 由 gVisor 负责握手、重传、拥塞/流量控制、乱序重组和 FIN/RST/TIME_WAIT。
+- UDP 为每个目标建立 connected gVisor UDP endpoint。入口的每次 `Write` 对应一个
+  UDP 数据报,下行每次 `Read` 也保留数据报边界。隧道断开会销毁 endpoint;下一次
+  入口写入按同一目标重新解析、认证并建立 flow。
 
 ---
 
 ## 9. 代理入口(SOCKS5/HTTP)
 
-Go 实现提供 SOCKS5 CONNECT/UDP ASSOCIATE 和 HTTP/1.1
-CONNECT/CONNECT-UDP;Python 参考实现只提供 SOCKS5 CONNECT。
+geekTrust 提供 SOCKS5 CONNECT/UDP ASSOCIATE 和 HTTP/1.1 CONNECT/CONNECT-UDP。
 
 ### 9.1 SOCKS5 CONNECT
 
@@ -734,7 +700,7 @@ signKey = UPPER_HEX( h1 XOR SHA256( UPPER_HEX(h1) + challenge_b64 ) )
 
 - `challenge` 取 `authConfig.antiMITMAttackData.challenge`(base64 原文,不解码)。
 - `devicePubKeyMod`/`devicePubKeyExp` 取 `authConfig.antiMITMAttackData` 下发值。
-- 实现见 `src/atrust_crypto.py:sign_key`(已用真实日志 3/3 验证)。
+- 该算法已用真实登录日志验证(3/3 一致)。
 
 ### 10.2 encryptedChallenge
 
@@ -745,7 +711,7 @@ key,iv = k[0:16], k[16:32]
 encryptedChallenge = UPPER_HEX( AES-CBC-128-PKCS7( challenge_b64 字符串, key, iv ) )
 ```
 
-实现见 `src/atrust_crypto.py:encrypted_challenge`(与实测值一致)。
+计算结果与实测值一致。
 
 ### 10.3 X-Request-Sig(桌面路径接口签名)
 
@@ -788,10 +754,12 @@ X-Request-Sig = UPPER_HEX( HMAC-SHA256( hex_decode(signKey), pathWithQuery + bod
 | `10000001` | invalid_param / invalid arguments(参数非法,如 platform 大小写错、authRequestIP 结构不符) | 检查参数/结构 |
 | `10000004` | ERR_PERMISSION_DENIED: session not found(会话不存在) | 会话失效,需重登 |
 | `10000008` | interface sig verify failed(接口签名错误) | 桌面路径签名缺失/错误;改用浏览器路径或修正签名 |
+| `75500000` | 当前未安装客户端或使用纯web模式登录,无法添加授信终端 | 改用 `client_type = "client"` 后重新登录 |
 | `75500001` | 当前认证已超时,请返回首页重新登录 | 重新走登录流程 |
 | `75500002` | 会话无效/用户未登录 | 重登 |
 | `75500006` | 当前账号已在线,无需重复上线 | 复用在线会话或先下线 |
 | `75500304` | 当前票据已失效 | 重新获取票据 |
+| `75500401` | 验证码仍在有效期内(sendsms 重复请求) | 直接输入上一条短信的验证码 |
 | `75599999` | 操作异常(authCheck 前置未完成/设备未注册) | 确保先 reportEnv |
 
 ### 11.2 隧道/数据面
@@ -831,11 +799,11 @@ X-Request-Sig = UPPER_HEX( HMAC-SHA256( hex_decode(signKey), pathWithQuery + bod
 
 ### 12.3 保活与重连
 
-- 隧道心跳:参考实现 20 秒一次、只发不收,判死由读循环失败检测(见 §5.4);Go 实现建议改用「连续多次丢失判死」的主动保活。
-- 断线后指数退避重连(如 1s→30s 封顶);连续失败用持久化凭据静默重登;
-  仅当服务器再次强制新设备验证时才提示用户(尽量避免)。
+- 隧道心跳:每 20 秒一次,连续 3 个周期未收到任何帧即判死并重连(见 §5.4)。
+- 断线后指数退避重连(1s→30s 封顶);连续失败用持久化凭据静默重登;
+  仅当服务器再次要求短信验证时才提示用户。
 - 会话在线刷新:周期调用 `onlineInfo` 检测会话有效性,失效触发重登。
-- 网络变化监听(可选):网络切换后主动重建隧道。
+- 未实现网络变化监听;网络切换后依赖心跳判死和重连恢复。
 
 ### 12.4 线路选择与切换
 
@@ -844,35 +812,12 @@ X-Request-Sig = UPPER_HEX( HMAC-SHA256( hex_decode(signKey), pathWithQuery + bod
 - 代理入口拒绝把当前网关 `host:port` 再送回隧道,避免外部透明代理/TUN 将
   geekTrust 的网关连接回送至 geekTrust SOCKS5 时形成递归连接。
 
----
+### 12.5 DNS 回退
 
-## 13. 参考实现索引(Python)
+公共 DNS 和隧道 DNS 使用以下回退规则:
 
-| 文件 | 职责 | 对应章节 |
-|---|---|---|
-| `src/atrust_crypto.py` | signKey / encryptedChallenge / RSA 加密 | §10.1 §10.2 |
-| `src/atrust_l3.py` | L3 隧道(TLS 接入、隧道认证、心跳、帧收发)+ 用户态 TCP 端点(握手/重组/中继) | §5 §6 §7 §8(TCP 参考) |
-| `src/atrust_socks5.py` | clientResource 拉取、域名映射、SOCKS5 入口、双向中继 | §4 §9 |
-| `third_party/shanghaitech-ids-passkey/` | IDS passkey 免密登录(keystore) | §3.1 |
-
-### 13.1 关键函数与协议对应
-
-- `atrust_l3.L3Tunnel._tunnel_auth` — §5.3 隧道认证三段写入与 VIP 解析。
-- `atrust_l3.L3Tunnel.request_auth` — §6 每连接认证(按 `conntrackHash` 匹配 0x93 响应)。
-- `atrust_l3.L3Tunnel.send_data` — §7.1 上行 0x14 数据帧。
-- `atrust_l3.L3Tunnel._read_data_resp` / `_split_ip_packets` — §7.2 下行 0x94 两种布局 + IP 包拆分。
-- `atrust_l3.TCPConn._do_per_conn_auth` — §6.2 authRequestIP 构造。
-- `atrust_l3.TCPConn.on_ip_packet` — §8.3 TCP 重组。
-- `atrust_socks5.fetch_client_resource` — §4.1 浏览器路径免签 clientResource。
-- `atrust_socks5.build_domain_map` — §4.2 域名→内网 IP 映射。
-- `atrust_socks5.handle_socks5` — §9 SOCKS5 握手与中继。
-
-### 13.2 实测验证结果
-
-```
-SOCKS5 监听 127.0.0.1:1080
-curl --socks5-hostname 127.0.0.1:1080 -k https://library.shanghaitech.edu.cn/
-  → HTTP 200,<title>上海科技大学图书馆</title>
-curl --socks5-hostname 127.0.0.1:1080 -k https://library.shanghaitech.edu.cn/qbsjk/list.htm
-  → HTTP 200,<title>全部数据库</title>
-```
+- UDP 查询最多等待 1.5 秒。失败或回复截断时,改用同一服务器的 TCP,最多等待 3 秒;隧道 TCP 按自身的协议规则选择授权应用。
+- UDP 失败后,冷却期间优先使用 TCP。冷却时间从 30 秒逐次加倍,最长 5 分钟;到期后只放行一个 UDP 探测,其他并发请求继续使用 TCP。收到有效 UDP 回复后恢复正常。
+- UDP 和 TCP 都失败的服务器临时冷却,改试备用 DNS,到期后重新探测。NXDOMAIN 等有效回复不算失败,调用方取消请求也不计入失败。
+- 同一域名的并发查询共用一次请求,单个调用方取消不影响其他调用方。会话、DNS 列表、网关配置或授权策略变化后重置隧道 DNS 的健康状态;这些状态只保存在内存中。
+- 系统 DNS 阶段最多等待 2 秒。

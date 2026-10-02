@@ -1,6 +1,6 @@
 # geekTrust 设计与实施计划
 
-> **项目名称:geekTrust** —— 面向上海科技大学 aTrust VPN(Sangfor aTrust SDP 2.0,`https://vpn.shanghaitech.edu.cn/`)的独立、纯粹的 VPN 客户端。
+> **项目名称:geekTrust** —— 面向 Sangfor aTrust SDP 2.0 VPN 的独立、纯用户态客户端,以上海科技大学 aTrust(`https://vpn.shanghaitech.edu.cn/`)为主要对象。另实现了华东师范大学的 passkey 登录,但命令行完整连接流程未经验证(限制见 README)。
 > 目标:完成「登录 → 隧道建立 → 流量代理」全过程,通过本地 SOCKS5/HTTP 代理把 VPN 环境暴露给其他程序,并**长期稳定保活**。
 > 协议的全部细节(请求/响应结构、字段、状态码)见 [`TECHNICAL.md`](./TECHNICAL.md);本计划聚焦工程设计与实施。
 
@@ -81,49 +81,58 @@
 ## 3. 目录结构
 
 ```
-geektrust/
-  cmd/geektrust/main.go            # CLI 入口(-config config.toml)
-  internal/
-    idsauth/                       # IDS passkey 免密登录(Go 移植,仅登录,不含绑定)
-      keystore.go                  #   keystore 读取(zlib 压缩 JSON,兼容 Python 库格式)
-      webauthn.go                  #   WebAuthn assertion 签名(ES256/EdDSA/RS256)
-      client.go                    #   IDS 登录流程(execution → startAssertion → login)
-    sdpc/                          # 控制器 API(TECHNICAL.md §3 §4)
-      authconfig.go                #   authConfig
-      login.go                     #   casLogin/CAS 跳转、reportEnv、authCheck、sms、sessionIdExchange
-      resource.go                  #   clientResource(浏览器路径免签)、appList 解析、域名映射
-      client.go                    #   公共参数/头、错误码处理
-    session/                       # 会话凭据存储 + 自动刷新/静默重登(CredentialProvider 实现)
-      store.go                     #   凭据加密持久化(0600)
-      provider.go                  #   有效性检测(onlineInfo)、失效重登
-    frame/                         # 0x05 帧编解码(TECHNICAL.md §5.2 §7)
-      codec.go                     #   请求/响应帧、数据帧两种布局、IP 包拆分
-    tunnel/                        # 隧道(TLS 接入、隧道认证、心跳、重连、线路切换)
-      tunnel.go                    #   L3Tunnel:连接/认证/VIP/心跳/reader 循环
-      line.go                      #   线路探测择优 + 失败切换
-      reconnect.go                 #   指数退避重连
-    l3/                            # 每流认证 + gVisor IPv4(TCP/UDP Dialer 实现)
-      auth.go                      #   authRequestIP 构造、per-conn auth(0x13/0x93)
-      gvisor.go                    #   IPv4 link endpoint、TCP/UDP net.Conn 封装
-    inbound/                       # 代理入口(仅依赖 Dialer/Resolver)
-      socks5.go                    #   RFC 1928 CONNECT + UDP ASSOCIATE
-      http.go                      #   HTTP CONNECT + RFC 9298 CONNECT-UDP
-      udp.go                       #   connected UDP flow 表、重建与回收
-      server.go                    #   监听/并发/优雅退出
-    resolver/                      # 域名→隧道内 IP(Resolver 实现)
-    config/                        # 配置加载/初始化(init)/状态路径
-    webui/                         # Web 面板(docs/WEBUI.md)
-      hub.go                       #   状态推导/快照/事件环形缓冲/SSE 订阅
-      broker.go                    #   短信双通道(网页 + 共享 stdin 读取器)先到先赢
-      server.go                    #   HTTP+SSE 服务、Host/Origin/CT 校验、内嵌前端
-      dist/                        #   前端构建产物(embed;gitignore,仅 .gitkeep 入库)
-  web/                             # 面板前端源码(React + Vite + TS;产物不入库)
-  config.example.toml
+cmd/geektrust/                     # CLI 入口(-config config.toml;init/login/run/dial/trust-device)
+client/                            # 供项目内复用的客户端库(见 client/README.md)
+internal/
+  idsauth/                         # IDS passkey 免密登录(仅登录,不含绑定)
+    keystore.go                    #   keystore 读写(魔数前缀 + zlib 压缩 JSON,兼容 shanghaitech-ids-passkey 格式)
+    webauthn.go                    #   WebAuthn assertion 签名(ES256/EdDSA/RS256)
+    client.go                      #   按 keystore 类型选择登录流程
+    shtu.go / ecnu.go              #   上海科大(execution → startAssertion → login)/ 华东师大登录流程
+  sdpc/                            # 控制器 API(TECHNICAL.md §3 §4)
+    authconfig.go                  #   authConfig
+    login.go                       #   casLogin/CAS 跳转、reportEnv、authCheck、sms、sessionIdExchange
+    resource.go                    #   clientResource(浏览器路径免签)、appList 解析、路由规则
+    trust_device.go                #   授信终端查询/绑定/取消/注销
+    client.go                      #   公共参数/头、错误码处理
+  session/                         # 会话凭据存储 + 自动刷新/静默重登(CredentialProvider 实现)
+    store.go                       #   凭据加密持久化(仅当前用户可读写)
+    provider.go                    #   有效性检测(onlineInfo)、失效重登
+    events.go                      #   面向 Web 面板的会话事件与错误脱敏
+    routing.go                     #   按 node group 选择网关线路
+  frame/                           # 0x05 帧编解码(TECHNICAL.md §5.2 §7)
+    codec.go                       #   请求/响应帧、数据帧两种布局、IP 包拆分
+  tunnel/                          # 隧道(TLS 接入、隧道认证、心跳、重连、线路切换)
+    tunnel.go                      #   L3Tunnel:连接/认证/VIP/心跳/reader 循环
+    tcp.go                         #   TCP 流式通道
+    line.go                        #   线路错峰竞速 + 失败冷却
+    reconnect.go                   #   指数退避重连
+  l3/                              # 每流认证 + gVisor IPv4(TCP/UDP Dialer 实现)
+    auth.go                        #   authRequestIP 构造、per-conn auth(0x13/0x93)
+    gvisor.go                      #   IPv4 link endpoint、TCP/UDP net.Conn 封装
+    dialer.go                      #   Dialer:流式通道优先,L3 回退与重试
+    icmp.go                        #   ICMP Echo(供 client 包 ExchangePacket 使用)
+  inbound/                         # 代理入口(仅依赖 Dialer/Resolver)
+    socks5.go                      #   RFC 1928 CONNECT + UDP ASSOCIATE
+    http.go                        #   HTTP CONNECT + RFC 9298 CONNECT-UDP
+    udp.go                         #   connected UDP flow 表、重建与回收
+    server.go                      #   监听/并发/优雅退出
+  resolver/                        # 域名→隧道内 IP(Resolver 实现)、DNS UDP/TCP 自适应回退
+  config/                          # 配置加载/校验/初始化(init)
+  privatefile/                     # 凭据文件权限保护(Unix 0600 / Windows ACL)
+  webui/                           # Web 面板(docs/WEBUI.md)
+    hub.go                         #   状态推导/快照/事件环形缓冲/SSE 订阅
+    broker.go                      #   短信双通道(网页 + 共享 stdin 读取器)先到先赢
+    server.go                      #   HTTP+SSE 服务、Host/Origin/CT 校验、内嵌前端
+    dist/                          #   前端构建产物(embed;仅 .gitkeep 入库)
+web/                               # 面板前端源码(React + Vite + TS)
+scripts/                           # 发布打包脚本
+tools/zipdir/                      # 打包用 ZIP 工具(避免依赖系统 zip)
+config.example.toml
 docs/
-  TECHNICAL.md                     # 协议技术规格(权威)
+  TECHNICAL.md                     # 协议技术规格
   PLAN.md                          # 本文档
-  WEBUI.md                         # Web 面板设计守则
-  ANALYSIS.md / HANDOFF.md / PROTOCOL.md   # 早期调研笔记(归档,仅供内部参考)
+  WEBUI.md                         # Web 面板设计
 ```
 
 ---
@@ -132,9 +141,9 @@ docs/
 
 ### 4.1 首次设置
 
-1. **绑定 passkey**:引导用户使用 Python 库 `third_party/shanghaitech-ids-passkey` 的 `bind` 命令
-   (需浏览器交互),生成 `keystore` 文件。geekTrust 的 Go 实现**不实现绑定**(绑定涉及浏览器自动化,
-   Python 库已完备),仅消费已绑定的 keystore。
+1. **绑定 passkey**:`geektrust init --bind-passkey` 通过 `uvx` 运行
+   [shanghaitech-ids-passkey](https://github.com/vvbbnn00/shanghaitech-ids-passkey) 的 `bind` 命令
+   (需浏览器交互)生成 keystore,也可直接使用该工具生成的 keystore。geekTrust 的 Go 代码**不实现绑定**,仅消费已绑定的 keystore。
 2. **首次短信验证**:新 `device_id` 首次登录时,服务器要求短信二次验证,无法绕过。
 
 ### 4.2 自动恢复与再次验证
@@ -153,13 +162,13 @@ browser 模式下服务端是否再次要求短信并不完全由 `device_id` �
 
 ### 4.3 Go 移植 ids-passkey 登录(仅登录)
 
-参照 Python 库 `client.py` 的流程(TECHNICAL.md §3.1):
+参照 shanghaitech-ids-passkey 的登录流程(TECHNICAL.md §3.1):
 
-1. **读取 keystore**(`keystore.go`):兼容 Python 库格式(zlib 压缩的 JSON),字段含
+1. **读取 keystore**(`keystore.go`):兼容该工具的格式(魔数前缀 + zlib 压缩的 JSON),字段含
    `username`、`credential_id`、`alg`、`private_key_pem`、`sign_count`、`user_id`、`anon_biometrics_id`、
    `base_url`、`device_name`、`rp_id`、`created_at`。**回写时必须保留全部字段(含未识别字段)**,
-   否则 Python 库 `from_dict` 会因缺字段而失败。
-2. **取 execution**(`client.go`):`GET <ids>/authserver/login?...` 页面,提取 `execution` 隐藏字段值。
+   否则 Python 工具读取时会因缺字段而失败。
+2. **取 execution**(`shtu.go`):`GET <ids>/authserver/login?...` 页面,提取 `execution` 隐藏字段值。
 3. **发起 assertion**(`webauthn.go`):`POST startAssertion {userId: base64(username), id: anon_biometrics_id}` →
    响应路径 `result.request.publicKeyCredentialRequestOptions`(含 challenge),同级有 `result.request.requestId`;
    用 passkey 私钥对 `authenticatorData + clientDataHash` 签名(WebAuthn assertion),`sign_count += 1`。
@@ -170,7 +179,7 @@ browser 模式下服务端是否再次要求短信并不完全由 `device_id` �
 5. **回写 keystore**:`sign_count` 递增后持久化(保留全部字段)。
 
 > 签名算法(`alg`)由 keystore 指定:`-7`=ES256(P-256,`crypto/ecdsa`)、`-8`=EdDSA(`crypto/ed25519`)、
-> `-257`=RS256(`crypto/rsa` PKCS#1 v1.5)。WebAuthn 断言格式参照 Python 库 `_webauthn.py:create_authentication_response`。
+> `-257`=RS256(`crypto/rsa` PKCS#1 v1.5)。
 
 ---
 
@@ -227,10 +236,9 @@ browser 模式下服务端是否再次要求短信并不完全由 `device_id` �
 | 层级     | 机制                                                           |
 | -------- | -------------------------------------------------------------- |
 | 隧道     | 心跳(20s,连续多次丢失判死,见 TECHNICAL.md §5.4)+ 指数退避重连 |
-| 线路     | TLS 握手探测择优 + 网关自代理回环保护 + 错误码触发换线          |
+| 线路     | 错峰 TLS 竞速 + 网关自代理回环保护 + 错误码触发换线            |
 | 会话     | 周期`onlineInfo` 检测 + 失效后 passkey 重登;服务端要求时提示短信 |
 | 凭据     | 加密持久化,重启复用                                            |
-| 网络变化 | 可选监听系统网络事件,主动重建隧道                              |
 | 入口连接 | 每连接独立 goroutine,单连接失败不影响整体;优雅退出             |
 
 ### 6.3 并发与资源
@@ -258,39 +266,13 @@ browser 模式下服务端是否再次要求短信并不完全由 `device_id` �
 
 ## 8. 配置(`config/`)
 
-`config.example.toml`(示意):
-
-```toml
-# 登录
-keystore = "./ids-passkey.keystore"     # passkey 凭据（由 bind 生成）
-device_id = "<init 生成的 32 位大写十六进制值>"  # 每个安装独立且持久化
-client_type = "client"                  # 支持授信终端绑定
-
-# 控制器
-base_url = "https://vpn.shanghaitech.edu.cn"
-platform = "Mac"                        # 大小写敏感
-
-# 网关(可多条,自动择优/切换)，默认直接从上游获取，如果填写则使用自定义的Gateway，从上游获取的时候如果给的是域名，可以指定dns服务器来解析
-gateways = ["119.78.254.241:441", "59.78.171.241:441"]
-
-# 代理入口
-[inbound.socks5]
-listen = "127.0.0.1:1080"
-[inbound.http]
-listen = "127.0.0.1:8080"
-
-# 状态持久化
-state_file = "./state.enc"              # 加密会话凭据(0600)
-
-# Web 面板(仅回环;enabled 默认 true)
-[web]
-enabled = true
-listen = "127.0.0.1:8081"
-```
+手工配置模板见仓库根目录的 [`config.example.toml`](../config.example.toml);推荐用 `geektrust init` 生成。
+配置在加载时补默认值并校验:`device_id` 必须为 32 位大写十六进制、`platform` 必须为 `Mac`、
+`dns` 只接受 IP、`[web].listen` 必须是回环地址且不能用 80 端口;client 模式拒绝旧版共享默认 `device_id`。
 
 Web 面板(`internal/webui/`):`run` 期间提供本机状态页(仅回环,默认 127.0.0.1:8081)。
 会话事件经 session 包的异步 FIFO 分发到 Hub;短信验证经 Broker 在网页与终端
-双通道先到先赢。设计守则为 [`docs/WEBUI.md`](./WEBUI.md)。
+双通道先到先赢。设计见 [`WEBUI.md`](./WEBUI.md)。
 
 ---
 
@@ -308,16 +290,11 @@ Web 面板(`internal/webui/`):`run` 期间提供本机状态页(仅回环,默认
 
 ## 10. 可行性说明
 
-- 全链路已用 Python 参考实现(`src/atrust_l3.py`、`src/atrust_socks5.py`)**线上实测打通**:
-  SOCKS5 代理访问 `https://library.shanghaitech.edu.cn/` 返回 HTTP 200(`<title>上海科技大学图书馆</title>`),
-  以及 `/qbsjk/list.htm`(`全部数据库`)。
-- 协议全部细节(请求/响应结构、字段、状态码、帧格式、TCP 重组、IP 包拆分)已固化为 [`TECHNICAL.md`](./TECHNICAL.md),
-  Go 实现按该规格逐模块对照实现即可,无未决协议风险。
+- 协议细节(请求/响应结构、字段、状态码、帧格式、IP 包拆分)见 [`TECHNICAL.md`](./TECHNICAL.md)。
 - 固定 `device_id` 和复用持久化会话可减少短信验证;服务端在后续完整登录中仍可能再次要求短信。
 
 ## 11. 参考
 
-你可以参考以下项目来实现我们的project，但注意这些只能作为参考，实现时还是尽可能尊重项目文档，只是在如果遇到坑之类的时候可以参考成熟的项目来避坑，在README中需要对这些项目进行鸣谢，你可以在.agent文件夹中clone这些项目，但注意.agent文件夹应当被git忽略。
-
+- [shanghaitech-ids-passkey](https://github.com/vvbbnn00/shanghaitech-ids-passkey)
 - [github.com/Mythologyli/zju-connect](https://github.com/Mythologyli/zju-connect/)
 - [github.com/XTLS/Xray-core](https://github.com/XTLS/Xray-core)
