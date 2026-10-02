@@ -217,15 +217,8 @@ func authenticateTunnel(ctx context.Context, conn net.Conn, addr, sid string, lo
 		conn.Close()
 		return nil, fmt.Errorf("tunnel auth deadline: %w", err)
 	}
-	authDone := make(chan struct{})
-	defer close(authDone)
-	go func() {
-		select {
-		case <-ctx.Done():
-			conn.Close()
-		case <-authDone:
-		}
-	}()
+	stopCancellation := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCancellation()
 	authFrames, err := frame.EncodeTunnelAuth(sid)
 	if err != nil {
 		conn.Close()
@@ -253,6 +246,12 @@ func authenticateTunnel(ctx context.Context, conn net.Conn, addr, sid string, lo
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("clear tunnel auth deadline: %w", err)
+	}
+	// The authenticated connection outlives the connect context. Disable its
+	// cancellation callback before publishing the tunnel to callers.
+	if !stopCancellation() || ctx.Err() != nil {
+		conn.Close()
+		return nil, ctx.Err()
 	}
 
 	t := &Tunnel{

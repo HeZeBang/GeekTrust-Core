@@ -37,6 +37,10 @@ dns = []
 # 加密的会话凭据文件(AES-256-GCM;密钥为同目录自动生成的 <state_file>.key,权限 0600)。
 state_file = "./state.enc"
 
+# ---- 日志 ----
+# debug / info / warn / error
+log_level = "info"
+
 # ---- 代理入口 ----
 # 注意:两个代理都没有认证。务必只监听回环地址(127.0.0.1);监听其他地址
 # 会把你的 VPN 会话开放给同网段的任何人。
@@ -47,7 +51,3 @@ listen = "127.0.0.1:1080"
 [inbound.http]
 enabled = true
 listen = "127.0.0.1:8080"
-
-# ---- 日志 ----
-# debug / info / warn / error
-log_level = "info"

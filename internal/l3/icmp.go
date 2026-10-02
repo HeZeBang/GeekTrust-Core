@@ -57,7 +57,7 @@ func (d *Dialer) ExchangePacket(ctx context.Context, packet []byte) ([]byte, err
 	defer tun.UnregisterConn(id)
 	authID := tun.NextAuthID()
 	// ICMP has no transport ports; only the Echo identifier is rewritten below.
-	body, err := buildAuthRequestIP(cred.SID, app, cred.DeviceID, destination.String(), 0, tun.VIP(), 0, authID, "", protocolICMP)
+	body, err := buildAuthRequestIP(tun.SID(), app, cred.DeviceID, destination.String(), 0, tun.VIP(), 0, authID, "", protocolICMP)
 	if err != nil {
 		return nil, err
 	}

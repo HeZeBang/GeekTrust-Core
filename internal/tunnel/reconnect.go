@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	reconnectBase = 1 * time.Second
-	reconnectMax  = 30 * time.Second
+	reconnectBase        = 1 * time.Second
+	reconnectMax         = 30 * time.Second
+	sharedConnectTimeout = 45 * time.Second
 )
 
 // Manager owns the live tunnel: it (re)connects on demand with exponential
@@ -43,19 +44,20 @@ type Manager struct {
 	// fresh multi-line race for every proxied connection.
 	directLines map[string]*Lines
 
-	closed        bool
-	connectCancel context.CancelFunc
-	mu            sync.Mutex
-	cur           *Tunnel
-	connecting    *connectCall
+	closed     bool
+	mu         sync.Mutex
+	cur        *Tunnel
+	connecting *connectCall
 }
 
 // connectCall is one in-flight connect shared by every concurrent caller:
 // all waiters block on done and then read the same result.
 type connectCall struct {
-	done   chan struct{} // closed once tunnel/err are populated
-	tunnel *Tunnel
-	err    error
+	done     chan struct{} // closed once err is populated
+	cancel   context.CancelFunc
+	waiters  int
+	finished bool
+	err      error
 }
 
 // NewManager builds a tunnel manager over the credential provider.
@@ -68,68 +70,103 @@ func NewManager(provider session.CredentialProvider, logger *slog.Logger) *Manag
 // session is closed and re-established. Concurrent callers share one
 // in-flight connect attempt.
 func (m *Manager) Tunnel(ctx context.Context) (*Tunnel, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	m.mu.Lock()
-	closed := m.closed
-	m.mu.Unlock()
-	if closed {
-		return nil, ErrTunnelDead
-	}
-	cred, err := m.provider.Credential(ctx)
-	if err != nil {
-		return nil, err
-	}
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return nil, ErrTunnelDead
-	}
-	if t := m.cur; t != nil && t.Alive() && t.SID() == cred.SID {
-		m.mu.Unlock()
-		return t, nil
-	}
-	// Dead, or authenticated with a since-rotated session.
-	if t := m.cur; t != nil {
-		t.Close()
-		m.cur = nil
-	}
-	call := m.connecting
-	if call == nil {
-		call = &connectCall{done: make(chan struct{})}
-		m.connecting = call
-		connectCtx, cancel := context.WithCancel(ctx)
-		m.connectCancel = cancel
-		m.mu.Unlock()
-
-		t, err := m.connect(connectCtx)
-		cancel()
-
-		m.mu.Lock()
-		m.connectCancel = nil
-		if m.closed {
-			if t != nil {
-				t.Close()
-			}
-			t, err = nil, ErrTunnelDead
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
+		m.mu.Lock()
+		closed := m.closed
+		m.mu.Unlock()
+		if closed {
+			return nil, ErrTunnelDead
+		}
+		cred, err := m.provider.Credential(ctx)
+		if err != nil {
+			return nil, err
+		}
+		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return nil, ErrTunnelDead
+		}
+		if t := m.cur; t != nil && t.Alive() && t.SID() == cred.SID {
+			m.mu.Unlock()
+			return t, nil
+		}
+		if t := m.cur; t != nil {
+			t.Close()
+			m.cur = nil
+		}
+		call := m.connecting
+		if call == nil {
+			// Each waiter owns its cancellation. The shared operation stops only
+			// when all waiters leave, the manager closes, or its total budget expires.
+			connectCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sharedConnectTimeout)
+			call = &connectCall{done: make(chan struct{}), cancel: cancel}
+			m.connecting = call
+			go m.runConnect(connectCtx, call)
+		}
+		call.waiters++
+		m.mu.Unlock()
+		err = m.waitConnect(ctx, call)
+		if err != nil {
+			return nil, err
+		}
+		// Re-read credentials and the published tunnel after joining. A session
+		// may have changed while authentication was in progress.
+	}
+}
+
+func (m *Manager) waitConnect(ctx context.Context, call *connectCall) error {
+	defer func() {
+		m.mu.Lock()
+		call.waiters--
+		if call.waiters == 0 && !call.finished {
+			if m.connecting == call {
+				m.connecting = nil
+			}
+			call.cancel()
+		}
+		m.mu.Unlock()
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-call.done:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return call.err
+	}
+}
+
+func (m *Manager) runConnect(ctx context.Context, call *connectCall) {
+	t, err := m.connect(ctx)
+	call.cancel()
+	m.mu.Lock()
+	if m.closed || m.connecting != call || call.waiters == 0 {
+		if t != nil {
+			t.Close()
+			t = nil
+		}
+		if m.closed {
+			err = ErrTunnelDead
+		} else {
+			err = context.Canceled
+		}
+	}
+	if m.connecting == call {
+		m.connecting = nil
 		if err == nil {
 			m.cur = t
 		}
-		m.connecting = nil
-		m.mu.Unlock()
-		call.tunnel, call.err = t, err
+	}
+	if !call.finished {
+		call.err = err
+		call.finished = true
 		close(call.done)
-		return t, err
 	}
 	m.mu.Unlock()
-	select {
-	case <-call.done:
-		return call.tunnel, call.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }
 
 // SwitchLine rotates the preferred gateway line and kills the current tunnel
@@ -160,8 +197,14 @@ func (m *Manager) Close() {
 	m.groupsMu.Lock()
 	m.mu.Lock()
 	m.closed = true
-	if m.connectCancel != nil {
-		m.connectCancel()
+	if call := m.connecting; call != nil {
+		m.connecting = nil
+		call.cancel()
+		if !call.finished {
+			call.err = ErrTunnelDead
+			call.finished = true
+			close(call.done)
+		}
 	}
 	t := m.cur
 	m.cur = nil

@@ -92,6 +92,7 @@ type refreshCall struct {
 	cred    *Credential
 	err     error
 	waiters int // joined callers (observability for tests; guarded by p.mu)
+	leader  context.Context
 }
 
 // NewProvider builds a credential provider. prompt may be nil; a login that
@@ -197,32 +198,43 @@ func (p *Provider) drainEvents() {
 // Credential returns current valid credentials. Concurrent callers share one
 // in-flight restore/login.
 func (p *Provider) Credential(ctx context.Context) (*Credential, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	p.mu.Lock()
-	if p.cur != nil {
-		cred := p.cur
-		p.mu.Unlock()
-		return cred, nil
-	}
-	call := p.refreshing
-	if call == nil {
-		call = &refreshCall{done: make(chan struct{})}
-		p.refreshing = call
-		p.mu.Unlock()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		p.mu.Lock()
+		if p.cur != nil {
+			cred := p.cur
+			p.mu.Unlock()
+			return cred, nil
+		}
+		call := p.refreshing
+		if call == nil {
+			call = &refreshCall{done: make(chan struct{}), leader: ctx}
+			p.refreshing = call
+			p.mu.Unlock()
 
-		cred, session, restored, err := p.acquire(ctx, false)
-		p.finishRefresh(call, cred, session, restored, err)
-		return cred, err
-	}
-	call.waiters++
-	p.mu.Unlock()
-	select {
-	case <-call.done:
-		return call.cred, call.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
+			cred, session, restored, err := p.acquire(ctx, false)
+			p.finishRefresh(call, cred, session, restored, err)
+			return cred, err
+		}
+		call.waiters++
+		p.mu.Unlock()
+		select {
+		case <-call.done:
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			// A restore/login still belongs to its initiating caller (including
+			// interactive SMS). A live joiner retries under its own context only
+			// when that caller canceled the acquisition, not on ordinary failures.
+			if call.err != nil && call.leader != nil && call.leader.Err() != nil && errors.Is(call.err, call.leader.Err()) {
+				continue
+			}
+			return call.cred, call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 }
 
@@ -386,6 +398,9 @@ func (p *Provider) CheckLoop(ctx context.Context, interval time.Duration) {
 // Invalidate, the restore step is skipped once: the persisted session is
 // the one the caller rejected.
 func (p *Provider) acquire(ctx context.Context, force bool) (*Credential, *SessionInfo, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, false, err
+	}
 	p.mu.Lock()
 	skipRestore := force || p.forceLogin
 	p.forceLogin = false
@@ -393,11 +408,17 @@ func (p *Provider) acquire(ctx context.Context, force bool) (*Credential, *Sessi
 
 	if !skipRestore {
 		if cred, session, err := p.restore(ctx); err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, false, ctx.Err()
+			}
 			p.logger.Warn("restoring persisted session failed; performing full login", "err", err)
 		} else if cred != nil {
 			p.logger.Info("restored persisted session", "restored", true)
 			return cred, session, true, nil
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, false, err
 	}
 	p.emit(Event{Kind: EventLoginStart, Message: "开始完整登录"})
 	cred, session, err := p.login(ctx)

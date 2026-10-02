@@ -243,8 +243,8 @@ func (p *dnsPool) lookupPool(ctx context.Context, host, scope string, servers []
 		if !ok {
 			continue
 		}
-		ip, err, reply := p.lookupServer(ctx, host, candidate.server, candidate.health, dial)
-		p.finishServer(candidate.health, generation, reply, ctx.Err() != nil)
+		ip, err, attempt := p.lookupServer(ctx, host, candidate.server, candidate.health, dial)
+		p.finishServer(candidate.health, generation, attempt.reply, ctx.Err() != nil || !attempt.started)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -256,30 +256,36 @@ func (p *dnsPool) lookupPool(ctx context.Context, host, scope string, servers []
 	return nil, lastErr
 }
 
-func (p *dnsPool) lookupServer(ctx context.Context, host, server string, h *dnsServerHealth, dial dnsDialFunc) (net.IP, error, bool) {
-	reply := false
+type dnsAttempt struct {
+	started bool // The resolver invoked the transport dialer.
+	reply   bool // A matching DNS reply was received from the transport.
+}
+
+func (p *dnsPool) lookupServer(ctx context.Context, host, server string, h *dnsServerHealth, dial dnsDialFunc) (net.IP, error, dnsAttempt) {
+	var attempt dnsAttempt
 	if generation, ok := p.beginUDP(h); ok {
-		ip, err, udpReply := lookupDNSAttempt(ctx, host, server, "udp", p.policy.udpTimeout, dial)
-		p.finishUDP(h, generation, udpReply, ctx.Err() != nil)
-		reply = udpReply
+		ip, err, udp := lookupDNSAttempt(ctx, host, server, "udp", p.policy.udpTimeout, dial)
+		p.finishUDP(h, generation, udp.reply, ctx.Err() != nil || !udp.started)
+		attempt = udp
 		if ctx.Err() != nil {
-			return nil, ctx.Err(), reply
+			return nil, ctx.Err(), attempt
 		}
 		var dnsErr *net.DNSError
-		if err == nil || errors.Is(err, errNoIPv4Answer) || (errors.As(err, &dnsErr) && dnsErr.IsNotFound) {
-			return ip, err, reply
+		if !udp.started || err == nil || errors.Is(err, errNoIPv4Answer) || (errors.As(err, &dnsErr) && dnsErr.IsNotFound) {
+			return ip, err, attempt
 		}
 	}
-	ip, err, tcpReply := lookupDNSAttempt(ctx, host, server, "tcp", p.policy.tcpTimeout, dial)
-	return ip, err, reply || tcpReply
+	ip, err, tcp := lookupDNSAttempt(ctx, host, server, "tcp", p.policy.tcpTimeout, dial)
+	return ip, err, dnsAttempt{started: attempt.started || tcp.started, reply: attempt.reply || tcp.reply}
 }
 
 // Each transport gets one total budget, including authorization, dialing and
 // resolver retries. A truncated UDP response receives a fresh TCP budget.
-func lookupDNSAttempt(ctx context.Context, host, server, transport string, timeout time.Duration, dial dnsDialFunc) (net.IP, error, bool) {
+func lookupDNSAttempt(ctx context.Context, host, server, transport string, timeout time.Duration, dial dnsDialFunc) (net.IP, error, dnsAttempt) {
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var reply atomic.Bool
+	var started atomic.Bool
 	resolver := &net.Resolver{PreferGo: true, Dial: func(_ context.Context, network, _ string) (net.Conn, error) {
 		if transport == "udp" && (network == "tcp" || network == "tcp4" || network == "tcp6") {
 			return nil, errDNSNeedsTCP
@@ -287,6 +293,7 @@ func lookupDNSAttempt(ctx context.Context, host, server, transport string, timeo
 		if err := attemptCtx.Err(); err != nil {
 			return nil, err
 		}
+		started.Store(true)
 		conn, err := dial(attemptCtx, transport, net.JoinHostPort(server, "53"))
 		if err != nil {
 			return nil, err
@@ -299,7 +306,7 @@ func lookupDNSAttempt(ctx context.Context, host, server, transport string, timeo
 		return watched, nil
 	}}
 	ip, err := lookupIPv4With(attemptCtx, resolver, host)
-	return ip, err, reply.Load()
+	return ip, err, dnsAttempt{started: started.Load(), reply: reply.Load()}
 }
 
 // Preserve PacketConn on UDP sockets: net.Resolver uses it to select datagram

@@ -233,7 +233,8 @@ func (d *Dialer) authorizeFlow(ctx context.Context, ip string, port int, appID, 
 	flow := &authorizedFlow{transport: transport, srcPort: srcPort}
 
 	authID := tun.NextAuthID()
-	body, err := buildAuthRequestIP(cred.SID, appID, cred.DeviceID, ip, port, tun.VIP(), srcPort, authID, domain, protocol)
+	// Tunnel establishment may refresh the session after cred was read.
+	body, err := buildAuthRequestIP(tun.SID(), appID, cred.DeviceID, ip, port, tun.VIP(), srcPort, authID, domain, protocol)
 	if err != nil {
 		flow.release()
 		return nil, err
