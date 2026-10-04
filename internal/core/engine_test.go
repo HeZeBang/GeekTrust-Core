@@ -188,14 +188,30 @@ func TestStartProxiesNeedsSession(t *testing.T) {
 	engine.Close()
 }
 
-func TestAttachTunFDSaysItIsNotImplemented(t *testing.T) {
+func TestAttachTunFDNeedsASession(t *testing.T) {
 	engine := New()
+	defer engine.Close()
+	if err := engine.AttachTunFD(-1); err != ErrNotInitialized {
+		t.Fatalf("AttachTunFD before init = %v, want ErrNotInitialized", err)
+	}
+}
+
+func TestAttachTunFDNeedsALiveTunnel(t *testing.T) {
+	quietLogs(t)
+	engine := New()
+	defer engine.Close()
+	if err := engine.Init(sampleSession, samplePolicy); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	// The session points at a dead gateway, so no tunnel ever came up: there
+	// is no VIP to answer for and nothing to forward to. The call must say so
+	// rather than pretend to carry traffic.
 	err := engine.AttachTunFD(-1)
 	if err == nil {
-		t.Fatal("the tun-fd inbound is not implemented; it must not report success")
+		t.Fatal("AttachTunFD must not succeed without a live tunnel")
 	}
-	if !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("error = %q, want it to say the inbound is not implemented", err)
+	if !strings.Contains(err.Error(), "no live tunnel") {
+		t.Fatalf("error = %q, want it to name the missing live tunnel", err)
 	}
 }
 
