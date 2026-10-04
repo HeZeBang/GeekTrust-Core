@@ -2,10 +2,10 @@ package sdpc
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
+	"encoding/json"
+	"fmt"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
 )
@@ -263,32 +263,20 @@ type clientResource struct {
 	} `json:"sdpPolicy"`
 }
 
-// ClientResource fetches the full resource policy via the unsigned browser
-// path. The appList includes the catch-all apps (外网资源/内网资源段) that
-// authorize nearly all internal/external destinations.
-func (c *Client) ClientResource(ctx context.Context) (*Resource, error) {
-	// The resource policy (appList etc.) is only returned on the browser
-	// path; the signed desktop variant answers env config only. Browser path
-	// works on client-mode sessions too.
-	body := map[string]any{
-		"resourceType": map[string]any{
-			"sdpPolicy":       map[string]any{},
-			"appList":         map[string]any{},
-			"favoriteAppList": map[string]any{},
-			"featureCenter":   map[string]any{},
-			"uemSpace":        map[string]any{"params": map[string]string{"action": "login"}},
-		},
-	}
-	var raw clientResource
-	if err := c.doJSON(ctx, "POST", "/controller/v1/user/clientResource", url.Values{}, body, &raw); err != nil {
-		return nil, err
-	}
-	return c.parseResource(&raw), nil
-}
-
 // parseResource builds the routing policy from the appList (incl. the
 // catch-all apps 外网资源/内网资源段) and the gateway lines.
-func (c *Client) parseResource(cr *clientResource) *Resource {
+// ParseResource builds the routing policy from the controller's clientResource
+// response body (the "data" object). The control plane fetches it — this repo
+// only turns it into the rules the data plane matches against.
+func ParseResource(data []byte, controllerHost string) (*Resource, error) {
+	var cr clientResource
+	if err := json.Unmarshal(data, &cr); err != nil {
+		return nil, fmt.Errorf("decode clientResource: %w", err)
+	}
+	return parseResource(&cr, controllerHost), nil
+}
+
+func parseResource(cr *clientResource, controllerHost string) *Resource {
 	res := &Resource{
 		NodeGroups:     make(map[string][]string),
 		AppNodeGroups:  make(map[string]string),
@@ -364,8 +352,8 @@ func (c *Client) parseResource(cr *clientResource) *Resource {
 	}
 
 	// Gateway lines: nodeGroupConf.nodeGroupList[].addressInfo[].address.
-	// "{{sdpcHost}}" stands for the controller host.
-	controllerHost := c.controllerHost()
+	// "{{sdpcHost}}" stands for the controller host, which the control plane
+	// names in the session it hands over.
 	seen := make(map[string]bool)
 	for _, ng := range cr.AppList.Data.Config.NodeGroupConf.NodeGroupList {
 		groupSeen := make(map[string]bool)
@@ -443,14 +431,6 @@ func gatewayAddress(address string) (string, bool) {
 		return "", false
 	}
 	return net.JoinHostPort(host, port), true
-}
-
-func (c *Client) controllerHost() string {
-	u, err := url.Parse(c.BaseURL)
-	if err != nil {
-		return ""
-	}
-	return u.Hostname()
 }
 
 func isDottedIPv4(s string) bool {

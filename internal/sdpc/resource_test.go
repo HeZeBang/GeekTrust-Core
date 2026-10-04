@@ -2,7 +2,6 @@ package sdpc
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"testing"
 )
@@ -100,8 +99,7 @@ func parseSample(t *testing.T) *Resource {
 	if err := json.Unmarshal(env.Data, &raw); err != nil {
 		t.Fatal(err)
 	}
-	c := &Client{BaseURL: "https://vpn.shanghaitech.edu.cn", Platform: "Mac"}
-	return c.parseResource(&raw)
+	return parseResource(&raw, "vpn.shanghaitech.edu.cn")
 }
 
 func TestDomainRules(t *testing.T) {
@@ -292,24 +290,6 @@ func TestParsePortRange(t *testing.T) {
 	for in, want := range cases {
 		if got := parsePortRange(in); got != want {
 			t.Errorf("parsePortRange(%q) = %+v, want %+v", in, got, want)
-		}
-	}
-}
-
-func TestAPIErrorSessionExpired(t *testing.T) {
-	for code, want := range map[int64]bool{
-		CodeSessionInvalid: true,
-		CodeAuthTimeout:    true,
-		CodeSessionMissing: true,
-		CodeTicketExpired:  true,
-		CodeInvalidParam:   false,
-		CodeOpAbnormal:     false,
-	} {
-		err := &APIError{Op: "test", Code: code, Message: "x"}
-		for _, candidate := range []error{err, fmt.Errorf("wrapped: %w", err)} {
-			if got := IsSessionExpired(candidate); got != want {
-				t.Errorf("IsSessionExpired(%v) = %v, want %v", candidate, got, want)
-			}
 		}
 	}
 }
