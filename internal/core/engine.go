@@ -62,6 +62,13 @@ type Engine struct {
 
 	tunMu sync.Mutex
 	tun   *tunnel.Tunnel
+
+	// attachMu serializes attachments (building a device is not instant), and
+	// tunDevMu guards the installed one so a replacement and a teardown cannot
+	// race.
+	attachMu sync.Mutex
+	tunDevMu sync.Mutex
+	tunDev   *inbound.TunDevice
 }
 
 // stack is everything built from one session: the tunnel manager, the l3
@@ -392,10 +399,49 @@ func probeListen(addr string) error {
 }
 
 // AttachTunFD is the system-VPN shape (OHOS VpnConnection.create, Android
-// VpnService). It is a later phase: until it lands it fails and says so rather
-// than pretending to work.
+// VpnService): the platform created the interface and hands its file
+// descriptor over, and the library carries what the device sends through the
+// same tunnel and the same per-connection authorization the proxies use.
+//
+// Calling it again replaces the running attachment; a failed call leaves the
+// previous one running. Close tears it down (and never closes the caller's
+// descriptor).
+//
+// It needs a live tunnel: the tunnel's address (the VIP) is what the device's
+// own address is expected to be, and without a session there is nothing to
+// forward to. Wait for geektrust_status to report "alive": true before
+// attaching, and re-attach after a session change that moves the VIP.
 func (e *Engine) AttachTunFD(fd int) error {
-	return fmt.Errorf("geektrust_attach_tun_fd: the tun-fd inbound is not implemented yet, no tunnel was attached (fd %d); use geektrust_start_proxies for the userspace shape", fd)
+	e.attachMu.Lock()
+	defer e.attachMu.Unlock()
+
+	if e.currentStack() == nil {
+		return ErrNotInitialized
+	}
+	tun := e.lastTunnel()
+	if tun == nil || !tun.Alive() {
+		return fmt.Errorf("geektrust_attach_tun_fd: no live tunnel yet, so its address (vip) is unknown: wait for geektrust_status to report \"alive\": true, then attach fd %d", fd)
+	}
+	vip := tun.VIP()
+	if vip == nil || vip.To4() == nil {
+		return fmt.Errorf("geektrust_attach_tun_fd: the tunnel has no IPv4 address to answer for (fd %d)", fd)
+	}
+
+	// Build before replacing: a failure here must leave the previous
+	// attachment untouched.
+	device, err := inbound.NewTunDevice(fd, vip, e, e, logger)
+	if err != nil {
+		return fmt.Errorf("geektrust_attach_tun_fd: %w", err)
+	}
+	e.tunDevMu.Lock()
+	previous := e.tunDev
+	e.tunDev = device
+	e.tunDevMu.Unlock()
+	if previous != nil {
+		previous.Close()
+	}
+	logger.Info("tun-fd inbound attached", "vip", vip.String(), "fd", fd)
+	return nil
 }
 
 // statusSnapshot is docs/ABI.md's geektrust_status object. Field order is the
@@ -435,9 +481,16 @@ func (e *Engine) Status() ([]byte, error) {
 	return json.Marshal(snapshot)
 }
 
-// Close tears the tunnel and the listeners down. It is safe before Init and
-// after a previous Close.
+// Close tears the tunnel, the tun attachment and the listeners down. It is
+// safe before Init and after a previous Close. The descriptor a caller handed
+// to AttachTunFD is left open.
 func (e *Engine) Close() {
+	// Take the attachment lock so a Close that races an in-flight
+	// geektrust_attach_tun_fd tears down what that call installed, instead of
+	// letting it install a device nothing will ever stop.
+	e.attachMu.Lock()
+	defer e.attachMu.Unlock()
+
 	e.mu.Lock()
 	st := e.stack
 	e.stack = nil
@@ -446,6 +499,13 @@ func (e *Engine) Close() {
 	e.proxy = proxySet{}
 	e.mu.Unlock()
 
+	e.tunDevMu.Lock()
+	device := e.tunDev
+	e.tunDev = nil
+	e.tunDevMu.Unlock()
+	if device != nil {
+		device.Close()
+	}
 	if st != nil {
 		st.cancel()
 		st.manager.Close()

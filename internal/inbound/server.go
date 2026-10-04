@@ -1,6 +1,7 @@
 // Package inbound exposes TCP and UDP tunnel flows through local SOCKS5 and
-// HTTP proxies. It depends only on Dialer and Resolver contracts, never on
-// aTrust internals.
+// HTTP proxies, and — in the system-VPN shape — across a platform tun file
+// descriptor (TunDevice). It depends only on Dialer and Resolver contracts,
+// never on aTrust internals.
 package inbound
 
 import (

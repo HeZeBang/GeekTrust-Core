@@ -30,9 +30,44 @@ no-op.
 | `geektrust_version` | returns `"<abi>:<version>:<source digest>"`, e.g. `"1:v0.1.0-3-gabc1234:9f2c…"`. Static string, never freed. |
 | `geektrust_init` | takes the session and the policy, brings the tunnel up. Repeatable: a second call replaces the session (the app re-authenticates, then hands the new one over). |
 | `geektrust_start_proxies` | starts SOCKS5 and/or HTTP CONNECT on loopback. An empty string disables that listener. This is the desktop and in-app shape. |
-| `geektrust_attach_tun_fd` | hands over the tun file descriptor a platform VPN shell created (OHOS `VpnConnection.create`, Android `VpnService`). This is the system-VPN shape and the one call that is still being built — until it lands it fails with a message saying so, and never pretends to work. |
+| `geektrust_attach_tun_fd` | hands over the tun file descriptor a platform VPN shell created (OHOS `VpnConnection.create`, Android `VpnService`) and carries what the device sends through the tunnel. The system-VPN shape; see [The tun-fd attachment](#the-tun-fd-attachment). |
 | `geektrust_status` | JSON snapshot; cheap, call it on a timer. |
-| `geektrust_close` | tears the tunnel and the listeners down. |
+| `geektrust_close` | tears the tunnel, the tun attachment and the listeners down. It never closes a descriptor the app handed over. |
+
+### The tun-fd attachment
+
+`geektrust_attach_tun_fd` needs a **live tunnel**, because the address the stack
+answers for is the tunnel's own VIP: wait until `geektrust_status` reports
+`"alive": true`, then attach. A call that arrives earlier fails with a message
+saying so and attaches nothing. Re-attach after a session change whose VIP
+moved.
+
+The descriptor is a packet device: one read yields one IPv4 packet, one write
+sends one. The library duplicates it, sets its own copy non-blocking and reads
+through a pollable handle, so:
+
+- it **never closes the descriptor** — the app still owns it (and must close it
+  itself after `geektrust_close`),
+- the attachment can be stopped (`geektrust_close`) and replaced (attach again;
+  a failed attach leaves the previous one running),
+- a descriptor that cannot be polled is refused, because it could not be
+  stopped.
+
+Because the copy is non-blocking, the file description itself becomes
+non-blocking; do not read or write that descriptor from the app while it is
+attached.
+
+What the attachment carries, through the same tunnel, policy, gateway selection
+and per-connection authorization as the proxies:
+
+| Traffic | State |
+|---|---|
+| TCP | carried: the stack terminates the device's connection and relays it through the tunnel dialer. |
+| UDP | carried: each device-side flow becomes a tunnel UDP flow, up to one datagram of 1372 bytes (the tunnel MTU). |
+| ICMP echo to the tunnel VIP | carried: the stack answers it itself — this is what the offline test proves. |
+| ICMP to any other address | **not carried**: there is no per-connection authorization for an ICMP flow in the tunnel, and the stack drops it rather than reflect it. |
+| IPv6 | **not carried**: only IPv4 packets are read; the tunnel path is IPv4-only. |
+| UDP datagrams larger than the tunnel MTU | **not carried**: dropped instead of fragmented locally. |
 
 ## `session_json`
 

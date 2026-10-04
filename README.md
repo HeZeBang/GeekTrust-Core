@@ -26,7 +26,7 @@ answers with packets.
 | **Kept** | `internal/frame`, `internal/tunnel`, `internal/l3`, `internal/resolver`, `internal/inbound`, `internal/sdpc` (policy parsing only), `internal/session` (the credential types only) |
 | **Added for the library** | `internal/core` (the session the app hands over, the tunnel stack built from it, the proxy listeners) and `cmd/geektrustcore` (the C ABI shell — see `docs/ABI.md`) |
 | **Removed** | the CLI (`cmd/geektrust`), the IDS passkey client (`internal/idsauth`), the login/session provider, the web panel, the config file, the packaging scripts |
-| **Status** | the C ABI is implemented and `build.sh` builds `libgeektrust.so` for linux/amd64 and openharmony/arm64 — an artifact is installed into the app by hand, see [Building](#building). The one call still to come is `geektrust_attach_tun_fd` (the system-VPN shape): it fails with a message saying so rather than pretending to work |
+| **Status** | the C ABI is implemented and `build.sh` builds `libgeektrust.so` for linux/amd64 and openharmony/arm64 — an artifact is installed into the app by hand, see [Building](#building). Both shapes are in: `geektrust_start_proxies` for userspace and `geektrust_attach_tun_fd` for the platform VPN (OHOS `VpnConnection`, Android `VpnService`). The tun attachment needs a live tunnel (wait for `"alive": true`) and carries TCP and UDP through the same dialer; see `docs/ABI.md` for the traffic classes it does and does not carry |
 
 ## Naming
 
