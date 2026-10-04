@@ -106,12 +106,33 @@ so the routing rules are parsed in exactly one place — `sdpc.ParseResource`.
   "device_id": "E8483C84D8C0BFA3450C98945BD8E7FF",
   "username": "2023533189",
   "gateways": ["10.13.90.147:441"],
-  "dial_attempts": 12
+  "dial_attempts": 12,
+  "tun": {
+    "packets_in": 412,
+    "bytes_in": 38904,
+    "packets_out": 398,
+    "bytes_out": 42110,
+    "not_ipv4": 0,
+    "tcp_flows": 6,
+    "udp_flows": 3,
+    "refused_flows": 1,
+    "failed_flows": 0
+  }
 }
 ```
 
 `alive` is the tunnel's own liveness, not the controller's. The app decides
 whether the *session* is still good by asking the controller (`onlineInfo`).
+
+`tun` is present only while a descriptor is attached (`geektrust_attach_tun_fd`),
+and it is the attachment's own count of what it carried. It exists because a
+platform with no log channel — OHOS forwards no native stderr to hilog — would
+otherwise report every data-plane failure as the same silence: `packets_in`
+rising with `tcp_flows`/`udp_flows` at zero means the device's packets reach the
+stack but no flow is ever terminated, `refused_flows` counts flows the policy or
+the resolver rejected, and `failed_flows` counts flows the tunnel could not dial.
+Counting starts when a descriptor is attached, so it describes one attachment,
+not the process's history.
 
 ## Compatibility
 

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -79,6 +80,53 @@ type TunDevice struct {
 	flowMu sync.Mutex
 	flows  sync.WaitGroup
 	closed bool
+
+	stats tunStats
+}
+
+// tunStats counts what one attachment carried, in both directions. A platform
+// with no way to show the engine's own log (OHOS forwards no native stderr to
+// hilog) can still read this through geektrust_status, and that is what tells
+// "the device never sent a packet" apart from "the device sent packets and
+// every flow was refused" — two failures that look identical from outside.
+type tunStats struct {
+	packetsIn    atomic.Uint64
+	bytesIn      atomic.Uint64
+	packetsOut   atomic.Uint64
+	bytesOut     atomic.Uint64
+	notIPv4      atomic.Uint64
+	tcpFlows     atomic.Uint64
+	udpFlows     atomic.Uint64
+	refusedFlows atomic.Uint64
+	failedFlows  atomic.Uint64
+}
+
+// TunStats is a snapshot of tunStats in the shape geektrust_status reports.
+type TunStats struct {
+	PacketsIn    uint64 `json:"packets_in"`
+	BytesIn      uint64 `json:"bytes_in"`
+	PacketsOut   uint64 `json:"packets_out"`
+	BytesOut     uint64 `json:"bytes_out"`
+	NotIPv4      uint64 `json:"not_ipv4"`
+	TCPFlows     uint64 `json:"tcp_flows"`
+	UDPFlows     uint64 `json:"udp_flows"`
+	RefusedFlows uint64 `json:"refused_flows"`
+	FailedFlows  uint64 `json:"failed_flows"`
+}
+
+// Stats reports what this attachment has carried so far. It never blocks.
+func (d *TunDevice) Stats() TunStats {
+	return TunStats{
+		PacketsIn:    d.stats.packetsIn.Load(),
+		BytesIn:      d.stats.bytesIn.Load(),
+		PacketsOut:   d.stats.packetsOut.Load(),
+		BytesOut:     d.stats.bytesOut.Load(),
+		NotIPv4:      d.stats.notIPv4.Load(),
+		TCPFlows:     d.stats.tcpFlows.Load(),
+		UDPFlows:     d.stats.udpFlows.Load(),
+		RefusedFlows: d.stats.refusedFlows.Load(),
+		FailedFlows:  d.stats.failedFlows.Load(),
+	}
 }
 
 // NewTunDevice starts carrying traffic across fd. vip is the tunnel address the
@@ -310,9 +358,12 @@ func (d *TunDevice) readLoop() {
 		if n <= 0 {
 			continue
 		}
+		d.stats.packetsIn.Add(1)
+		d.stats.bytesIn.Add(uint64(n))
 		// Only IPv4 is carried; anything else is not a packet this stack can
 		// make sense of.
 		if packet[0]>>4 != 4 {
+			d.stats.notIPv4.Add(1)
 			d.logger.Debug("tun packet dropped: not IPv4", "version", packet[0]>>4)
 			continue
 		}
@@ -356,6 +407,9 @@ func (d *TunDevice) writeLoop() {
 			} else if n != len(data) {
 				// A packet device writes a whole packet or none of it.
 				d.logger.Debug("tun write truncated", "wrote", n, "want", len(data))
+			} else {
+				d.stats.packetsOut.Add(1)
+				d.stats.bytesOut.Add(uint64(n))
 			}
 		}
 		pkt.DecRef()
@@ -397,6 +451,7 @@ func packetBytes(pkt *stack.PacketBuffer) []byte {
 // the tunnel dialer. The destination comes from the packet itself: the device
 // resolved the name, we only carry the flow.
 func (d *TunDevice) handleTCP(request *tcp.ForwarderRequest) {
+	d.stats.tcpFlows.Add(1)
 	target := request.ID()
 	var wq waiter.Queue
 	ep, err := request.CreateEndpoint(&wq)
@@ -420,13 +475,17 @@ func (d *TunDevice) relayTCP(conn net.Conn, target stack.TransportEndpointID) {
 	resolution, err := d.resolver.Resolve(ctx, dstIP.String(), dstPort)
 	if err != nil {
 		cancel()
-		d.logger.Debug("tun TCP flow refused", "ip", dstIP.String(), "port", dstPort, "err", err)
+		d.stats.refusedFlows.Add(1)
+		// Warn, not Debug: a refused flow is the whole reason a device-side
+		// connection fails, and the default level has to show it.
+		d.logger.Warn("tun TCP flow refused", "ip", dstIP.String(), "port", dstPort, "err", err)
 		return
 	}
 	upstream, err := d.dialer.Dial(ctx, resolution.IP, dstPort, resolution.AppID, resolution.Domain)
 	cancel()
 	if err != nil {
-		d.logger.Debug("tun TCP flow not carried", "ip", resolution.IP, "port", dstPort, "err", err)
+		d.stats.failedFlows.Add(1)
+		d.logger.Warn("tun TCP flow not carried", "ip", resolution.IP, "port", dstPort, "err", err)
 		return
 	}
 	relayPair(conn, upstream)
@@ -436,6 +495,7 @@ func (d *TunDevice) relayTCP(conn net.Conn, target stack.TransportEndpointID) {
 // through the tunnel dialer. Datagrams for the flow after the first arrive at
 // the endpoint, not here.
 func (d *TunDevice) handleUDP(request *udp.ForwarderRequest) bool {
+	d.stats.udpFlows.Add(1)
 	target := request.ID()
 	var wq waiter.Queue
 	ep, err := request.CreateEndpoint(&wq)
@@ -458,13 +518,17 @@ func (d *TunDevice) relayUDP(conn *gonet.UDPConn, target stack.TransportEndpoint
 	resolution, err := d.resolver.ResolveUDP(ctx, dstIP.String(), dstPort)
 	if err != nil {
 		cancel()
-		d.logger.Debug("tun UDP flow refused", "ip", dstIP.String(), "port", dstPort, "err", err)
+		d.stats.refusedFlows.Add(1)
+		// Warn, not Debug: a device-side lookup dies here when the tunnel
+		// refuses its resolver, and that has to be visible.
+		d.logger.Warn("tun UDP flow refused", "ip", dstIP.String(), "port", dstPort, "err", err)
 		return
 	}
 	upstream, err := d.dialer.DialUDP(ctx, resolution.IP, dstPort, resolution.AppID, resolution.Domain)
 	cancel()
 	if err != nil {
-		d.logger.Debug("tun UDP flow not carried", "ip", resolution.IP, "port", dstPort, "err", err)
+		d.stats.failedFlows.Add(1)
+		d.logger.Warn("tun UDP flow not carried", "ip", resolution.IP, "port", dstPort, "err", err)
 		return
 	}
 	defer upstream.Close()

@@ -21,6 +21,12 @@ DIST="$ROOT/dist"
 # linux target builds with whatever Go and system C compiler are on PATH.
 OHOS_GOROOT="${OHOS_GOROOT:-/home/zambar/dev/ohos_golang_go}"
 OHOS_CC="${OHOS_CC:-/home/zambar/dev/command-line-tools/sdk/default/openharmony/native/llvm/bin/aarch64-unknown-linux-ohos-clang}"
+# The Android artifact is built with the NDK's bionic toolchain: the OHOS one is
+# musl and produces a library bionic refuses to load.
+ANDROID_CC="${ANDROID_CC:-/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang}"
+# Android needs *upstream* Go: the OpenHarmony fork's net package only carries the
+# openharmony cgo path, and cgo there cannot resolve getifaddrs.
+ANDROID_GO="${ANDROID_GO:-/usr/lib/go/bin/go}"
 LINUX_GO="${LINUX_GO:-go}"
 
 # ABI is the compatibility integer of docs/ABI.md; it must match core.ABI, which
@@ -77,6 +83,11 @@ CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
   -o "$DIST/libgeektrust-linux-amd64.so" ./cmd/geektrustcore
 
 echo "build.sh: building openharmony/arm64 with $OHOS_GOROOT"
+CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$ANDROID_CC" \
+  env -u GOROOT -u GOEXPERIMENT "$ANDROID_GO" build -buildmode=c-shared -trimpath \
+  -ldflags "$ldflags" \
+  -o "$DIST/libgeektrust-android-arm64.so" ./cmd/geektrustcore
+
 CGO_ENABLED=1 GOOS=openharmony GOARCH=arm64 GOROOT="$OHOS_GOROOT" CC="$OHOS_CC" \
   PATH="$OHOS_GOROOT/bin:$PATH" \
   "$OHOS_GOROOT/bin/go" build -buildmode=c-shared -trimpath -ldflags "$ldflags" \
@@ -84,6 +95,7 @@ CGO_ENABLED=1 GOOS=openharmony GOARCH=arm64 GOROOT="$OHOS_GOROOT" CC="$OHOS_CC" 
 
 LINUX_SO="$DIST/libgeektrust-linux-amd64.so"
 OHOS_SO="$DIST/libgeektrust-openharmony-arm64.so"
+ANDROID_SO="$DIST/libgeektrust-android-arm64.so"
 [ -f "$LINUX_SO" ] || fail "the linux build produced no $LINUX_SO"
 [ -f "$OHOS_SO" ] || fail "the openharmony build produced no $OHOS_SO"
 
@@ -99,7 +111,7 @@ fi
 
 # Every ABI entry point must be a dynamic symbol, or dlopen cannot find it.
 symbols_expected=(geektrust_version geektrust_init geektrust_start_proxies geektrust_attach_tun_fd geektrust_status geektrust_close)
-for so in "$LINUX_SO" "$OHOS_SO"; do
+for so in "$LINUX_SO" "$OHOS_SO" "$ANDROID_SO"; do
   exported="$(nm -D "$so" | awk '{print $NF}' | grep '^geektrust_' | sort -u || true)"
   for symbol in "${symbols_expected[@]}"; do
     grep -qx "$symbol" <<<"$exported" || fail "$so does not export $symbol"
@@ -117,7 +129,7 @@ echo "marker:   $marker"
 echo "digest:   $digest"
 echo
 echo "exported symbols:"
-for so in "$LINUX_SO" "$OHOS_SO"; do
+for so in "$LINUX_SO" "$OHOS_SO" "$ANDROID_SO"; do
   echo "  $(basename "$so"):"
   nm -D "$so" | awk '{print $NF}' | grep '^geektrust_' | sort -u | sed 's/^/    /'
 done
