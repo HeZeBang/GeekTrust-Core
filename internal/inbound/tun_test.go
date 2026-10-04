@@ -288,7 +288,7 @@ func TestTunDeviceCarriesTCPFlowThroughTheTunnelDialer(t *testing.T) {
 	peer, fd := testTunPair(t)
 	dialer := &mockDialer{calls: make(chan dialCall, 1)}
 	res := &mockResolver{result: &resolver.Resolution{IP: target.String(), AppID: "web-app"}}
-	newTestTunDevice(t, fd, vip, res, dialer)
+	device := newTestTunDevice(t, fd, vip, res, dialer)
 
 	const clientPort = 50000
 	const serverPort = 443
@@ -334,8 +334,74 @@ func TestTunDeviceCarriesTCPFlowThroughTheTunnelDialer(t *testing.T) {
 			if !bytes.Equal(payload, echo) {
 				t.Fatalf("echoed payload = %q, want %q", payload, echo)
 			}
-			return
+			break
 		}
+	}
+
+	// The attachment's own count is the only account of the data plane a
+	// platform with no log channel has, so a carried flow must show up in it.
+	stats := device.Stats()
+	if stats.PacketsIn == 0 || stats.PacketsOut == 0 || stats.TCPFlows != 1 {
+		t.Fatalf("tun stats after one carried flow = %+v, want packets both ways and one TCP flow", stats)
+	}
+	if stats.RefusedFlows != 0 || stats.FailedFlows != 0 {
+		t.Fatalf("tun stats after one carried flow = %+v, want no refusal and no failure", stats)
+	}
+}
+
+// TestTunDeviceCountsARefusedFlow proves the attachment records a flow it
+// refused, and that the refusal never reaches the dialer. That count is what a
+// device log cannot supply on OHOS: a resolver refusing every flow (an
+// unauthorized destination) used to look exactly like a device that never sent
+// a packet, because the refusal was one Debug line and the default level is
+// Info.
+func TestTunDeviceCountsARefusedFlow(t *testing.T) {
+	vip := net.IPv4(10, 20, 205, 16)
+	deviceAddr := net.IPv4(10, 20, 205, 17)
+	target := net.IPv4(198, 51, 100, 7)
+	peer, fd := testTunPair(t)
+	dialer := &mockDialer{calls: make(chan dialCall, 1)}
+	device := newTestTunDevice(t, fd, vip, &mockResolver{failAll: true}, dialer)
+
+	const clientPort = 50000
+	const serverPort = 443
+	const clientISN = 1000
+	if _, err := peer.Write(tcpSegment(deviceAddr, target, clientPort, serverPort, clientISN, 0, tcpSyn, nil)); err != nil {
+		t.Fatalf("write SYN: %v", err)
+	}
+
+	// The forwarder only runs the relay once the device-side connection is
+	// established, so the handshake has to complete before the refusal can be
+	// observed at all.
+	synAck := readTCPSegment(t, peer, tcpSyn|tcpAck, 3*time.Second)
+	ihl := int(synAck[0]&0x0f) * 4
+	serverISN := binary.BigEndian.Uint32(synAck[ihl+4 : ihl+8])
+	if _, err := peer.Write(tcpSegment(deviceAddr, target, clientPort, serverPort, clientISN+1, serverISN+1, tcpAck, nil)); err != nil {
+		t.Fatalf("write ACK: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		stats := device.Stats()
+		if stats.RefusedFlows == 1 {
+			if stats.TCPFlows != 1 {
+				t.Fatalf("tun stats = %+v, want exactly one terminated TCP flow", stats)
+			}
+			if stats.FailedFlows != 0 {
+				t.Fatalf("tun stats = %+v, want no dial failure", stats)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tun stats = %+v, want the refused flow counted", stats)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	select {
+	case call := <-dialer.calls:
+		t.Fatalf("a refused flow reached the dialer: %+v", call)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

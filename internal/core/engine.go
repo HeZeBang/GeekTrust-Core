@@ -455,6 +455,18 @@ type statusSnapshot struct {
 	Username     string   `json:"username"`
 	Gateways     []string `json:"gateways"`
 	DialAttempts uint64   `json:"dial_attempts"`
+	// Tun is the running attachment's own account of what it carried, and it
+	// is absent while nothing is attached. On a platform with no log channel
+	// this is the only way to tell a device that sends nothing apart from one
+	// whose every flow was refused.
+	Tun *inbound.TunStats `json:"tun,omitempty"`
+}
+
+// currentTunDevice is the attachment in place right now, or nil.
+func (e *Engine) currentTunDevice() *inbound.TunDevice {
+	e.tunDevMu.Lock()
+	defer e.tunDevMu.Unlock()
+	return e.tunDev
 }
 
 // Status is a cheap snapshot: it never connects, so it is safe to poll.
@@ -477,6 +489,10 @@ func (e *Engine) Status() ([]byte, error) {
 			snapshot.VIP = vip.String()
 		}
 		snapshot.Gateway = tun.Addr()
+	}
+	if device := e.currentTunDevice(); device != nil {
+		stats := device.Stats()
+		snapshot.Tun = &stats
 	}
 	return json.Marshal(snapshot)
 }
